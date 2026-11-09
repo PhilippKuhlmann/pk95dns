@@ -12,7 +12,7 @@ import (
 )
 
 // version is set by the image build (-ldflags "-X main.version=…").
-var version = "1.0.0"
+var version = "1.1.0"
 
 func main() {
 	cfg := app.Config{

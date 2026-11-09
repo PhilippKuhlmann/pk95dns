@@ -10,14 +10,14 @@ import (
 
 	"pk95dns/internal/config"
 	"pk95dns/internal/dnsserver"
-	"pk95dns/internal/filter"
+	"pk95dns/internal/records"
 	"pk95dns/internal/stats"
 	"pk95dns/internal/store"
 	"pk95dns/internal/upstream"
 )
 
 // withDNS attaches a real DNS server (not listening) with the given clients and records.
-func withDNS(t *testing.T, e *env, clients []store.Client, rewrites []filter.RewriteEntry) *dnsserver.Server {
+func withDNS(t *testing.T, e *env, clients []store.Client, recs []records.Record) *dnsserver.Server {
 	t.Helper()
 	srv := dnsserver.New(dnsserver.Deps{Filter: e.eng, Cache: e.cache, Log: e.qlog, Stats: e.stats})
 	router, err := upstream.NewRouter(upstream.Config{
@@ -30,7 +30,7 @@ func withDNS(t *testing.T, e *env, clients []store.Client, rewrites []filter.Rew
 	srv.Apply(dnsserver.Runtime{
 		Settings: e.settings.Load().Clone(),
 		Router:   router,
-		Rewrites: filter.NewRewrites(rewrites),
+		Records:  records.Compile(nil, recs),
 		Clients:  clients,
 	})
 	e.api.d.DNS = srv
@@ -55,7 +55,7 @@ func TestCheckWithDNSServer(t *testing.T) {
 	expect(t, e.call("PUT", "/api/rules", map[string]string{"text": "||custom.example^"}), 200)
 	withDNS(t, e,
 		[]store.Client{{ID: 1, Name: "Laptop", IDs: []string{"192.168.1.20"}, UseGlobalSettings: true, FilteringEnabled: true, UseGlobalServices: true}},
-		[]filter.RewriteEntry{{Domain: "nas.lan", Answer: "192.168.1.10"}})
+		[]records.Record{{Name: "nas.lan", Type: "A", Value: "192.168.1.10", TTL: 60, Enabled: true}})
 
 	tests := []struct {
 		query                    string
@@ -65,7 +65,7 @@ func TestCheckWithDNSServer(t *testing.T) {
 	}{
 		{"name=ads.example.net&type=A&client=192.168.1.20", "blocked", "list", "AdGuard DNS filter", l.ID, "Laptop"},
 		{"name=custom.example", "blocked", "custom", "", 0, ""},
-		{"name=nas.lan", "rewrite", "rewrite", "", 0, ""},
+		{"name=nas.lan", "rewrite", "record", "", 0, ""},
 		{"name=fine.example.org&type=aaaa", "ok", "", "", 0, ""},
 	}
 	for _, tc := range tests {

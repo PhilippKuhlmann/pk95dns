@@ -180,60 +180,6 @@ func TestSafeSearchTarget(t *testing.T) {
 	}
 }
 
-func TestRewritesLookup(t *testing.T) {
-	r := NewRewrites([]RewriteEntry{
-		{Domain: "nas.lan", Answer: "192.168.1.10"},
-		{Domain: "NAS.lan.", Answer: "fd00::10"},
-		{Domain: "*.lan", Answer: "192.168.1.1"},
-		{Domain: "*.b.lan", Answer: "192.168.1.2"},
-		{Domain: "*.a.b.lan", Answer: "192.168.1.3"},
-		{Domain: "*.a.b.lan", Answer: "host.example"},
-		{Domain: "exact.a.b.lan", Answer: "10.0.0.1"},
-		{Domain: "", Answer: "1.1.1.1"},
-		{Domain: "*.", Answer: "1.1.1.1"},
-	})
-	if r.Len() != 7 {
-		t.Errorf("Len = %d, want 7", r.Len())
-	}
-	tests := []struct {
-		name string
-		want []string // answers
-	}{
-		{"nas.lan", []string{"192.168.1.10", "fd00::10"}},
-		{"NAS.LAN.", []string{"192.168.1.10", "fd00::10"}},
-		{"other.lan", []string{"192.168.1.1"}},
-		{"x.y.lan", []string{"192.168.1.1"}},
-		{"b.lan", []string{"192.168.1.1"}}, // "*.b.lan" does not match b.lan itself
-		{"x.b.lan", []string{"192.168.1.2"}},
-		{"a.b.lan", []string{"192.168.1.2"}},
-		{"x.a.b.lan", []string{"192.168.1.3", "host.example"}},
-		{"deep.x.a.b.lan", []string{"192.168.1.3", "host.example"}},
-		{"exact.a.b.lan", []string{"10.0.0.1"}},
-		{"lan", nil},
-		{"example.org", nil},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var got []string
-			for _, e := range r.Lookup(tt.name) {
-				got = append(got, e.Answer)
-			}
-			if !slices.Equal(got, tt.want) {
-				t.Errorf("got %v, want %v", got, tt.want)
-			}
-		})
-	}
-	// Lookup returns a copy.
-	r.Lookup("nas.lan")[0].Answer = "changed"
-	if r.Lookup("nas.lan")[0].Answer != "192.168.1.10" {
-		t.Error("Lookup returns shared data")
-	}
-	var empty *Rewrites
-	if empty.Lookup("nas.lan") != nil || empty.Len() != 0 || NewRewrites(nil).Lookup("x") != nil {
-		t.Error("empty tables must not match")
-	}
-}
-
 func TestNormalizeName(t *testing.T) {
 	tests := map[string]string{
 		"example.org":   "example.org",

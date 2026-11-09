@@ -14,7 +14,7 @@ import (
 	"github.com/miekg/dns"
 
 	"pk95dns/internal/config"
-	"pk95dns/internal/filter"
+	"pk95dns/internal/records"
 	"pk95dns/internal/store"
 )
 
@@ -590,7 +590,6 @@ func TestLocalRecords(t *testing.T) {
 		{"exact AAAA", "nas.home.lan", dns.TypeAAAA, 0, []string{"AAAA fd00::10"}, "fd00::10", nil, nil},
 		{"case insensitive", "NAS.Home.LAN", dns.TypeA, 0, []string{"A 192.168.1.10"}, "192.168.1.10", nil, nil},
 		{"other family empty", "v4only.home.lan", dns.TypeAAAA, 0, nil, "", nil, []string{"v4only.home.lan"}},
-		{"other type empty", "nas.home.lan", dns.TypeMX, 0, nil, "", nil, []string{"nas.home.lan"}},
 		{"wildcard", "printer.home.lan", dns.TypeA, 0, []string{"A 192.168.1.99"}, "192.168.1.99", nil, nil},
 		{"wildcard deep", "a.b.home.lan", dns.TypeA, 0, []string{"A 192.168.1.99"}, "192.168.1.99", nil, nil},
 		{"cname to local", "alias.home.lan", dns.TypeA, 0, []string{"CNAME nas.home.lan.", "A 192.168.1.10"}, "CNAME nas.home.lan, 192.168.1.10", nil, []string{"nas.home.lan"}},
@@ -609,11 +608,14 @@ func TestLocalRecords(t *testing.T) {
 			if got := answers(resp); !slices.Equal(got, tt.answer) {
 				t.Fatalf("answer %v, want %v", got, tt.answer)
 			}
-			if l.q.Status != "rewrite" || l.q.Reason != "rewrite" || l.q.Answer != tt.summary {
+			if l.q.Status != "rewrite" || l.q.Reason != "record" || l.q.Answer != tt.summary {
 				t.Fatalf("log %+v", l.q)
 			}
+			if resp.Authoritative {
+				t.Fatal("AA bit on a single record")
+			}
 			for _, r := range resp.Answer {
-				if strings.HasSuffix(r.Header().Name, "home.lan.") && r.Header().Ttl != localTTL {
+				if strings.HasSuffix(r.Header().Name, "home.lan.") && r.Header().Ttl != records.RewriteTTL {
 					t.Fatalf("local TTL %d", r.Header().Ttl)
 				}
 			}
@@ -632,6 +634,13 @@ func TestLocalRecords(t *testing.T) {
 		})
 	}
 
+	t.Run("other types of a single record go upstream", func(t *testing.T) {
+		e := newEnv(t, nil)
+		_, l := e.query("nas.home.lan", dns.TypeMX)
+		if l.q.Status != "ok" || e.up.count("nas.home.lan", dns.TypeMX) != 1 {
+			t.Fatalf("MX of a single record name: %+v", l.q)
+		}
+	})
 	t.Run("not the wildcard domain itself", func(t *testing.T) {
 		e := newEnv(t, nil)
 		_, l := e.query("home.lan", dns.TypeA)
@@ -639,14 +648,14 @@ func TestLocalRecords(t *testing.T) {
 			t.Fatalf("home.lan: %+v", l.q)
 		}
 	})
-	t.Run("loop terminates", func(t *testing.T) {
+	t.Run("loop is SERVFAIL", func(t *testing.T) {
 		e := newEnv(t, nil)
 		resp, l := e.query("loop1.lan", dns.TypeA)
-		if resp == nil || resp.Rcode != dns.RcodeSuccess || l.q.Status != "rewrite" {
+		if resp == nil || resp.Rcode != dns.RcodeServerFailure || len(resp.Answer) != 0 || l.q.Status != "rewrite" || l.q.Reason != "record" {
 			t.Fatalf("loop: %v %+v", resp, l.q)
 		}
-		if n := len(resp.Answer); n != maxCNAMEDepth+1 {
-			t.Fatalf("CNAMEs in loop answer: %d", n)
+		if e.up.count("loop1.lan", dns.TypeA)+e.up.count("loop2.lan", dns.TypeA) != 0 {
+			t.Fatal("loop asked upstream")
 		}
 	})
 	t.Run("upstream failure of target", func(t *testing.T) {
@@ -672,10 +681,8 @@ func TestLocalRecords(t *testing.T) {
 	})
 	t.Run("local records beat filtering", func(t *testing.T) {
 		e := newEnv(t, nil)
-		e.rewrites = filter.NewRewrites([]filter.RewriteEntry{{Domain: "ads.example", Answer: "192.168.1.77"}})
-		e.apply()
-		resp, l := e.query("ads.example", dns.TypeA)
-		if got := answers(resp); !slices.Equal(got, []string{"A 192.168.1.77"}) || l.q.Status != "rewrite" {
+		resp, l := e.query("x.ads.example", dns.TypeA) // ||ads.example^ is on the block list
+		if got := answers(resp); !slices.Equal(got, []string{"A 192.168.1.77"}) || l.q.Status != "rewrite" || l.q.Rule != "" {
 			t.Fatalf("got %v %+v", got, l.q)
 		}
 	})
@@ -969,8 +976,13 @@ func TestCheck(t *testing.T) {
 		{"service", "tiktok.com", dns.TypeA, "", CheckResult{Name: "tiktok.com", Type: "A", Status: "blocked_service", Reason: "service", Rule: "||tiktok.com^", Service: "tiktok", Answer: "0.0.0.0"}},
 		{"allowed", "allowed.example", dns.TypeA, "", CheckResult{Name: "allowed.example", Type: "A", Status: "allowed", Reason: "custom", Rule: "@@||allowed.example^"}},
 		{"safesearch", "www.bing.com", dns.TypeA, "", CheckResult{Name: "www.bing.com", Type: "A", Status: "safesearch", Reason: "safesearch", Answer: "CNAME strict.bing.com"}},
-		{"local", "nas.home.lan", dns.TypeA, "", CheckResult{Name: "nas.home.lan", Type: "A", Status: "rewrite", Reason: "rewrite", Answer: "192.168.1.10"}},
-		{"local cname", "ext.home.lan", dns.TypeA, "", CheckResult{Name: "ext.home.lan", Type: "A", Status: "rewrite", Reason: "rewrite", Answer: "CNAME target.example"}},
+		{"local", "nas.home.lan", dns.TypeA, "", CheckResult{Name: "nas.home.lan", Type: "A", Status: "rewrite", Reason: "record", Answer: "192.168.1.10"}},
+		{"local cname", "ext.home.lan", dns.TypeA, "", CheckResult{Name: "ext.home.lan", Type: "A", Status: "rewrite", Reason: "record", Answer: "CNAME target.example"}},
+		{"zone", "mail.corp.lan", dns.TypeMX, "", CheckResult{Name: "mail.corp.lan", Type: "MX", Status: "rewrite", Reason: "zone", Answer: "MX 10 mx.corp.lan"}},
+		{"zone cname chain", "alias.corp.lan", dns.TypeA, "", CheckResult{Name: "alias.corp.lan", Type: "A", Status: "rewrite", Reason: "zone", Answer: "CNAME www.corp.lan, 10.0.0.80"}},
+		{"zone nxdomain", "nope.corp.lan", dns.TypeA, "", CheckResult{Name: "nope.corp.lan", Type: "A", Status: "rewrite", Reason: "zone"}},
+		{"blocked name with record", "x.ads.example", dns.TypeA, "", CheckResult{Name: "x.ads.example", Type: "A", Status: "rewrite", Reason: "record", Answer: "192.168.1.77"}},
+		{"auto ptr", "80.0.0.10.in-addr.arpa", dns.TypePTR, "", CheckResult{Name: "80.0.0.10.in-addr.arpa", Type: "PTR", Status: "rewrite", Reason: "record", Answer: "PTR www.corp.lan"}},
 		{"hosts", "nas.hosts.example", dns.TypeA, "", CheckResult{Name: "nas.hosts.example", Type: "A", Status: "rewrite", Reason: "custom", Rule: "192.168.1.5 nas.hosts.example", Answer: "192.168.1.5"}},
 		{"nothing", "plain.example", dns.TypeA, "", CheckResult{Name: "plain.example", Type: "A", Status: "ok"}},
 		{"client filtering off", "ads.example", dns.TypeA, "192.168.1.50", CheckResult{Name: "ads.example", Type: "A", ClientIP: "192.168.1.50", ClientName: "TV", Status: "ok"}},
@@ -990,7 +1002,7 @@ func TestCheck(t *testing.T) {
 	if e.logCount() != 0 {
 		t.Fatal("Check logged queries")
 	}
-	for _, n := range []string{"plain.example", "strict.bing.com", "target.example", "allowed.example"} {
+	for _, n := range []string{"plain.example", "strict.bing.com", "target.example", "allowed.example", "nope.corp.lan"} {
 		if e.up.count(n, dns.TypeA) != 0 {
 			t.Fatalf("Check asked the upstream for %s", n)
 		}

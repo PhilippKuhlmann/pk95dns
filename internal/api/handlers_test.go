@@ -17,6 +17,7 @@ import (
 
 	"pk95dns/internal/config"
 	"pk95dns/internal/filter"
+	"pk95dns/internal/records"
 	"pk95dns/internal/stats"
 	"pk95dns/internal/store"
 	"pk95dns/internal/upstream"
@@ -48,7 +49,7 @@ func TestHealthManifestBackup(t *testing.T) {
 		ID: "dns", Name: "PK95 DNS", Version: "1.2.3", Protocol: 1, Icon: "shield",
 		Menu: []MenuItem{
 			{"overview", "Übersicht", "home"}, {"log", "Abfragen", "list"}, {"lists", "Blocklisten", "shield"},
-			{"rules", "Eigene Regeln", "pencil"}, {"rewrites", "Lokale Einträge", "link"}, {"services", "Dienste", "lock"},
+			{"rules", "Eigene Regeln", "pencil"}, {"records", "DNS-Einträge", "link"}, {"services", "Dienste", "lock"},
 			{"clients", "Clients", "user"}, {"settings", "Einstellungen", "cog"},
 		},
 		Capabilities: []string{"events", "backup"},
@@ -88,8 +89,20 @@ func TestStatus(t *testing.T) {
 	if err := e.st.SaveCustomRules("||a.example^\nbad$foo\n@@||b.example^"); err != nil {
 		t.Fatal(err)
 	}
-	for _, rw := range []store.Rewrite{{Domain: "nas.lan", Answer: "192.168.1.2", Enabled: true}, {Domain: "x.lan", Answer: "192.168.1.3"}} {
-		if _, err := e.st.CreateRewrite(rw); err != nil {
+	if _, err := e.st.CreateZone(records.Zone{Name: "home.lan", TTL: 300, PrimaryNS: "ns.home.lan", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.CreateZone(records.Zone{Name: "off.lan", TTL: 300, PrimaryNS: "ns.off.lan"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range []records.Record{
+		{Name: "nas.lan", Type: "A", Value: "192.168.1.2", Enabled: true},      // single record
+		{Name: "x.lan", Type: "A", Value: "192.168.1.3"},                       // disabled
+		{Name: "www.home.lan", Type: "CNAME", Value: "nas.lan", Enabled: true}, // zone, rewrite type
+		{Name: "home.lan", Type: "MX", Value: "mx.home.lan", Enabled: true},    // zone, not a rewrite
+		{Name: "a.off.lan", Type: "A", Value: "192.168.1.4", Enabled: true},    // disabled zone
+	} {
+		if _, err := e.st.CreateRecord(rec); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -104,7 +117,7 @@ func TestStatus(t *testing.T) {
 	if st.Version != "1.2.3" || !st.CoreMode || st.StartedAt != 1762700000000 {
 		t.Errorf("head = %+v", st)
 	}
-	if st.Rules != (rulesJSON{Lists: 1, ListRules: 1500, CustomRules: 2, Rewrites: 1, Services: 2}) {
+	if st.Rules != (rulesJSON{Lists: 1, ListRules: 1500, CustomRules: 2, Rewrites: 2, Zones: 1, Records: 3, Services: 2}) {
 		t.Errorf("rules = %+v", st.Rules)
 	}
 	if !st.Protection.Enabled || st.Protection.PausedUntil != 0 {
@@ -562,72 +575,6 @@ func TestCheckValidation(t *testing.T) {
 	expectFields(t, e.call("GET", "/api/check?name=a.example&client=999.1.1.1", nil), "client")
 	// Without a DNS server (tests) the check answers 503.
 	expect(t, e.call("GET", "/api/check?name=a.example", nil), 503)
-}
-
-func TestRewrites(t *testing.T) {
-	e := newCoreEnv(t)
-	tests := []struct {
-		name   string
-		body   map[string]any
-		fields []string
-	}{
-		{"empty", map[string]any{}, []string{"domain", "answer"}},
-		{"bad domain", map[string]any{"domain": "bad domain", "answer": "1.2.3.4"}, []string{"domain"}},
-		{"bad answer", map[string]any{"domain": "nas.lan", "answer": "not valid!"}, []string{"answer"}},
-		{"self", map[string]any{"domain": "nas.lan", "answer": "NAS.lan."}, []string{"answer"}},
-		{"zone", map[string]any{"domain": "nas.lan", "answer": "fe80::1%eth0"}, []string{"answer"}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			expectFields(t, e.call("POST", "/api/rewrites", tc.body), tc.fields...)
-		})
-	}
-
-	w := e.call("POST", "/api/rewrites", map[string]any{"domain": "NAS.Home.Lan.", "answer": "192.168.1.10"})
-	expect(t, w, 201)
-	var rw store.Rewrite
-	decodeBody(t, w, &rw)
-	if rw.ID == 0 || rw.Domain != "nas.home.lan" || rw.Answer != "192.168.1.10" || !rw.Enabled || rw.CreatedAt == 0 {
-		t.Errorf("created %+v", rw)
-	}
-	w = e.call("POST", "/api/rewrites", map[string]any{"domain": "*.home.lan", "answer": "Router.Home.Lan", "enabled": false})
-	expect(t, w, 201)
-	var wild store.Rewrite
-	decodeBody(t, w, &wild)
-	if wild.Answer != "router.home.lan" || wild.Enabled {
-		t.Errorf("wildcard %+v", wild)
-	}
-	expectFields(t, e.call("POST", "/api/rewrites", map[string]any{"domain": "nas.home.lan", "answer": "192.168.1.10"}), "domain")
-
-	var all []store.Rewrite
-	decodeBody(t, e.call("GET", "/api/rewrites", nil), &all)
-	if len(all) != 2 || all[0].Domain != "*.home.lan" {
-		t.Errorf("list = %+v", all)
-	}
-
-	w = e.call("PUT", fmt.Sprintf("/api/rewrites/%d", rw.ID), map[string]any{"domain": "nas.home.lan", "answer": "fd00::10", "enabled": false})
-	expect(t, w, 200)
-	decodeBody(t, w, &rw)
-	if rw.Answer != "fd00::10" || rw.Enabled {
-		t.Errorf("updated %+v", rw)
-	}
-	expect(t, e.call("PUT", "/api/rewrites/999", map[string]any{"domain": "a.lan", "answer": "1.1.1.1"}), 404)
-	expectFields(t, e.call("PUT", fmt.Sprintf("/api/rewrites/%d", rw.ID), map[string]any{"domain": "", "answer": "1.1.1.1"}), "domain")
-	expect(t, e.call("DELETE", fmt.Sprintf("/api/rewrites/%d", rw.ID), nil), 204)
-	expect(t, e.call("DELETE", fmt.Sprintf("/api/rewrites/%d", rw.ID), nil), 404)
-	if e.reloads != 4 {
-		t.Errorf("reloads = %d, want 4", e.reloads)
-	}
-
-	// A failing reload is reported.
-	e.reloadErr = &InvalidError{Msg: "kaputt"}
-	w = e.call("POST", "/api/rewrites", map[string]any{"domain": "c.lan", "answer": "1.1.1.1"})
-	expect(t, w, 422)
-	if errorOf(t, w) != "kaputt" {
-		t.Errorf("reload error = %s", w.Body)
-	}
-	e.reloadErr = errors.New("db gone")
-	expect(t, e.call("POST", "/api/rewrites", map[string]any{"domain": "d.lan", "answer": "1.1.1.1"}), 500)
 }
 
 func TestServices(t *testing.T) {

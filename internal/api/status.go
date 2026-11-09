@@ -8,6 +8,7 @@ import (
 	"pk95dns/internal/config"
 	"pk95dns/internal/dnsserver"
 	"pk95dns/internal/filter"
+	"pk95dns/internal/records"
 	"pk95dns/internal/store"
 	"pk95dns/internal/upstream"
 )
@@ -29,7 +30,9 @@ type rulesJSON struct {
 	Lists       int `json:"lists"`
 	ListRules   int `json:"list_rules"`
 	CustomRules int `json:"custom_rules"`
-	Rewrites    int `json:"rewrites"`
+	Rewrites    int `json:"rewrites"` // deprecated: served A, AAAA and CNAME records
+	Zones       int `json:"zones"`
+	Records     int `json:"records"`
 	Services    int `json:"services"`
 }
 
@@ -84,16 +87,12 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st.Rules.CustomRules = custom
-	rws, err := a.d.Store.Rewrites()
+	ix, err := a.recordsIndex()
 	if err != nil {
 		internalError(w, r, err)
 		return
 	}
-	for _, rw := range rws {
-		if rw.Enabled {
-			st.Rules.Rewrites++
-		}
-	}
+	st.Rules.Zones, st.Rules.Records, st.Rules.Rewrites = ix.ZoneCount(), ix.RecordCount(), ix.RewriteCount()
 	st.Rules.Services = len(s.BlockedServices)
 	st.Cache.Enabled = s.CacheEnabled
 	if a.d.Cache != nil {
@@ -106,6 +105,25 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, st)
+}
+
+// recordsIndex returns the records index the DNS server answers from; without a DNS server
+// (tests) it is compiled from the store.
+func (a *API) recordsIndex() (*records.Index, error) {
+	if a.d.DNS != nil {
+		if ix := a.d.DNS.Records(); ix != nil {
+			return ix, nil
+		}
+	}
+	zones, err := a.d.Store.Zones()
+	if err != nil {
+		return nil, err
+	}
+	recs, err := a.d.Store.Records(store.RecordFilter{})
+	if err != nil {
+		return nil, err
+	}
+	return records.Compile(zones, recs), nil
 }
 
 // customCount returns the number of valid custom rules (cached until the rules change).

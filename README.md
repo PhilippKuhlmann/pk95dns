@@ -18,8 +18,11 @@ oder eigenständig mit eigener Oberfläche.
   Erlaubnislisten heben Einträge der Blocklisten auf.
 - **Eigene Regeln** mit derselben Syntax, ungültige Zeilen werden mit Grund angezeigt. Im Abfrageprotokoll
   lässt sich jede Domain mit einem Klick sperren oder freigeben.
-- **Lokale Einträge** (`nas.home.lan → 192.168.1.10`, auch `*.home.lan` und Namen als CNAME). Sie gelten
-  immer, auch bei pausiertem Schutz.
+- **Eigene DNS-Zonen und -Einträge** wie ein vollwertiger DNS-Server: A, AAAA, CNAME, MX, TXT, SRV und PTR,
+  auch `*.home.lan`. Für eine Zone (etwa `home.lan` oder `1.168.192.in-addr.arpa`) antwortet PK95 DNS
+  autoritativ mit SOA, NS und NXDOMAIN; Einträge ohne Zone beantworten nur ihren Namen. A/AAAA-Einträge legen
+  auf Wunsch die Rückwärtsauflösung (PTR) mit an. Sie gelten immer, auch bei pausiertem Schutz. Die lokalen
+  Einträge aus Version 1.0 werden beim Update übernommen (gleiche ids, `/api/rewrites` bleibt nutzbar).
 - **Dienste sperren:** über 50 Dienste mit einem Schalter, etwa TikTok, Instagram, YouTube, Netflix, Steam,
   Roblox und ChatGPT.
 - **SafeSearch** für Google, Bing, DuckDuckGo, YouTube, Yandex und Pixabay.
@@ -44,7 +47,7 @@ Unter Core läuft PK95 DNS als Container `ghcr.io/philippkuhlmann/pk95-dns` im L
 (Katalog `dns`):
 
 1. In Core unter *Apps* „PK95 DNS“ installieren. Core startet den Container und zeigt die Seiten von
-   PK95 DNS in seinem Menü (Übersicht, Abfragen, Blocklisten, Eigene Regeln, Lokale Einträge, Dienste,
+   PK95 DNS in seinem Menü (Übersicht, Abfragen, Blocklisten, Eigene Regeln, DNS-Einträge, Dienste,
    Clients, Einstellungen).
 2. **Port 53 des LXC muss frei sein.** Der Container läuft im Host-Netz (`network_mode: host`), damit er
    Port 53 belegt und die echten Adressen der Geräte sieht. Läuft im LXC `systemd-resolved` mit
@@ -178,7 +181,8 @@ Das Startpasswort steht dann in `./data/initial-admin-password`. Core-Modus zum 
 | Paket | Inhalt |
 |---|---|
 | `internal/dnsserver` | UDP/TCP-Listener, Abfrageablauf, Clients, Rate-Limit |
-| `internal/filter` | Regel-Parser, Regelwerk, Dienste, SafeSearch, lokale Einträge |
+| `internal/filter` | Regel-Parser, Regelwerk, Dienste, SafeSearch |
+| `internal/records` | DNS-Zonen und -Einträge: Prüfung und Antwort-Index |
 | `internal/upstream` | DNS, DoT, DoH, DoH3, DoQ, Bootstrap, Router |
 | `internal/lists` | Download und Aktualisierung der Listen, Katalog |
 | `internal/cache` | Antwort-Cache |
