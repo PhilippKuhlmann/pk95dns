@@ -13,6 +13,7 @@ import (
 	"pk95dns/internal/cache"
 	"pk95dns/internal/config"
 	"pk95dns/internal/filter"
+	"pk95dns/internal/records"
 	"pk95dns/internal/stats"
 	"pk95dns/internal/store"
 	"pk95dns/internal/upstream"
@@ -252,20 +253,82 @@ const (
 `
 )
 
-func testRewrites() *filter.Rewrites {
-	return filter.NewRewrites([]filter.RewriteEntry{
-		{Domain: "nas.home.lan", Answer: "192.168.1.10"},
-		{Domain: "nas.home.lan", Answer: "fd00::10"},
-		{Domain: "v4only.home.lan", Answer: "192.168.1.11"},
-		{Domain: "*.home.lan", Answer: "192.168.1.99"},
-		{Domain: "alias.home.lan", Answer: "nas.home.lan"},
-		{Domain: "ext.home.lan", Answer: "target.example"},
-		{Domain: "extnx.home.lan", Answer: "nx.example"},
-		{Domain: "loop1.lan", Answer: "loop2.lan"},
-		{Domain: "loop2.lan", Answer: "loop1.lan"},
-		{Domain: "blockedtarget.lan", Answer: "ads.example"},
-		{Domain: "failtarget.lan", Answer: "servfail.example"},
-	})
+// longTXT is the value of long.corp.lan TXT: 600 characters (3 strings on the wire).
+var longTXT = strings.Repeat("abcdefghij", 60)
+
+// testZones: corp.lan (enabled, TTL 120), the reverse zone 168.192.in-addr.arpa and the
+// disabled zone off.lan.
+func testZones() []records.Zone {
+	return []records.Zone{
+		{ID: 1, Name: "corp.lan", TTL: 120, PrimaryNS: "ns.corp.lan", Enabled: true, Serial: 2026110901},
+		{ID: 2, Name: "168.192.in-addr.arpa", TTL: 300, PrimaryNS: "ns.corp.lan", Enabled: true, Serial: 2026110901},
+		{ID: 3, Name: "off.lan", TTL: 300, PrimaryNS: "ns.off.lan", Enabled: false, Serial: 2026110901},
+	}
+}
+
+// testRecords are the own records of the test environment: single records below home.lan
+// and *.lan (TTL 60, like migrated v1 rewrites) and the records of the test zones.
+func testRecords() []records.Record {
+	single := func(name, typ, value string) records.Record {
+		return records.Record{Name: name, Type: typ, Value: value, TTL: records.RewriteTTL, Enabled: true}
+	}
+	zoned := func(name, typ, value string) records.Record {
+		return records.Record{Name: name, Type: typ, Value: value, TTL: 300, Enabled: true}
+	}
+	mx := zoned("mail.corp.lan", "MX", "mx.corp.lan")
+	mx.Priority = 10
+	apexMX := zoned("corp.lan", "MX", "mx.corp.lan")
+	apexMX.Priority = 20
+	srv := zoned("_ldap._tcp.corp.lan", "SRV", "ldap.corp.lan")
+	srv.Weight, srv.Port = 5, 389
+	www4 := zoned("www.corp.lan", "A", "10.0.0.80")
+	www4.PTR = true
+	www6 := zoned("www.corp.lan", "AAAA", "fd00::80")
+	www6.PTR = true
+	nas5 := zoned("nas5.corp.lan", "A", "192.168.5.5")
+	nas5.PTR = true
+	host6 := zoned("host6.corp.lan", "A", "192.168.5.6")
+	host6.PTR = true
+	disabled := zoned("disabled.corp.lan", "A", "10.0.0.66")
+	disabled.Enabled = false
+	return []records.Record{
+		single("nas.home.lan", "A", "192.168.1.10"),
+		single("nas.home.lan", "AAAA", "fd00::10"),
+		single("v4only.home.lan", "A", "192.168.1.11"),
+		single("*.home.lan", "A", "192.168.1.99"),
+		single("alias.home.lan", "CNAME", "nas.home.lan"),
+		single("ext.home.lan", "CNAME", "target.example"),
+		single("extnx.home.lan", "CNAME", "nx.example"),
+		single("loop1.lan", "CNAME", "loop2.lan"),
+		single("loop2.lan", "CNAME", "loop1.lan"),
+		single("blockedtarget.lan", "CNAME", "ads.example"),
+		single("failtarget.lan", "CNAME", "servfail.example"),
+		single("x.ads.example", "A", "192.168.1.77"),
+		single("tozone.lan", "CNAME", "www.corp.lan"),
+
+		zoned("ns.corp.lan", "A", "10.0.0.53"),
+		www4, www6, mx, apexMX, srv, nas5, host6, disabled,
+		zoned("mx.corp.lan", "A", "10.0.0.25"),
+		zoned("ldap.corp.lan", "A", "10.0.0.89"),
+		zoned("corp.lan", "TXT", "v=spf1 mx -all"),
+		zoned("long.corp.lan", "TXT", longTXT),
+		zoned("a.b.corp.lan", "A", "10.0.0.1"),
+		zoned("*.dyn.corp.lan", "A", "10.0.0.99"),
+		zoned("fixed.dyn.corp.lan", "A", "10.0.0.98"),
+		zoned("alias.corp.lan", "CNAME", "www.corp.lan"),
+		zoned("out.corp.lan", "CNAME", "target.example"),
+		zoned("outnx.corp.lan", "CNAME", "nx.example"),
+		zoned("l1.corp.lan", "CNAME", "l2.corp.lan"),
+		zoned("l2.corp.lan", "CNAME", "l1.corp.lan"),
+		zoned("c1.corp.lan", "CNAME", "c2.corp.lan"),
+		zoned("c2.corp.lan", "CNAME", "c3.corp.lan"),
+		zoned("c3.corp.lan", "CNAME", "c4.corp.lan"),
+		zoned("c4.corp.lan", "CNAME", "c5.corp.lan"),
+		zoned("c5.corp.lan", "CNAME", "c6.corp.lan"),
+		zoned("c6.corp.lan", "CNAME", "www.corp.lan"),
+		zoned("6.5.168.192.in-addr.arpa", "PTR", "explicit.corp.lan"),
+		zoned("host.off.lan", "A", "10.9.9.9"),
+	}
 }
 
 func testEngine(t *testing.T) *filter.Engine {
@@ -325,7 +388,8 @@ type env struct {
 	cache    *cache.Cache
 	settings config.Settings
 	clients  []store.Client
-	rewrites *filter.Rewrites
+	zones    []records.Zone
+	recs     []records.Record
 
 	clock struct {
 		sync.Mutex
@@ -344,7 +408,7 @@ func newEnv(t *testing.T, mutate func(*config.Settings)) *env {
 	if mutate != nil {
 		mutate(&e.settings)
 	}
-	e.rewrites = testRewrites()
+	e.zones, e.recs = testZones(), testRecords()
 	e.srv = New(Deps{Filter: e.engine, Cache: e.cache})
 	e.srv.routerCloseDelay = time.Millisecond
 	e.srv.now = e.now
@@ -376,7 +440,7 @@ func (e *env) apply() {
 	e.srv.Apply(Runtime{
 		Settings: e.settings,
 		Router:   newRouter(e.t, e.settings),
-		Rewrites: e.rewrites,
+		Records:  records.Compile(e.zones, e.recs),
 		Clients:  e.clients,
 	})
 }

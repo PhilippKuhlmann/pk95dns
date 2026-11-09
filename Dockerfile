@@ -9,7 +9,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-ARG VERSION=1.0.0
+ARG VERSION=1.1.0
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 # Reines Go (modernc.org/sqlite): statisches Binary, baut ohne cgo auch für arm64.

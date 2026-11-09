@@ -49,7 +49,7 @@ the first password change.
 
 ```json
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "core_mode": true,
   "started_at": 1762700000000,
   "dns": { "listen": "0.0.0.0:53", "udp": true, "tcp": true, "error": "" },
@@ -130,12 +130,14 @@ Status vocabulary (also used by `/api/check`):
 | `blocked` | block rule (custom rules or a block list) |
 | `blocked_service` | a blocked service (`service` = service id) |
 | `safesearch` | rewritten to the SafeSearch host |
-| `rewrite` | own DNS record or zone answer (reason `record`/`zone`, also NXDOMAIN/NODATA of a zone), or a hosts rule with an address (`rule`) |
+| `rewrite` | own DNS record or zone answer (reason `record`/`zone`, also NXDOMAIN/NODATA of a zone, REFUSED for AXFR/IXFR and SERVFAIL for a local CNAME loop), or a hosts rule with an address (`rule`) |
 | `refused` | client not allowed, ANY refused, or rate limit |
 | `error` | all upstreams failed (SERVFAIL) |
 
 `reason`: `list`, `custom`, `service`, `safesearch`, `record` (single record), `zone` (authoritative zone, also its NXDOMAIN/NODATA), `access`, `any`, `ratelimit`, `upstream`, `""`.
-`answer`: short text, comma separated (`"93.184.216.34, 2606:2800::1"`, `"CNAME forcesafesearch.google.com"`, `""`).
+`answer`: short text, comma separated: addresses bare, other types with their type (`"93.184.216.34, 2606:2800::1"`,
+`"CNAME forcesafesearch.google.com"`, `"MX 10 mx.home.lan"`, `"SRV 0 5 389 ldap.home.lan"`, `"PTR nas.home.lan"`,
+`"TXT \"v=spf1 mx -all\""` – TXT strings joined, quoted and cut after 60 characters with `…`; `""`), at most 200 bytes.
 `next_before`: id for the next page, `0` when there is none.
 
 ### `DELETE /api/querylog` → `204`
@@ -202,7 +204,9 @@ and never blocked by lists. There are two kinds (docs/design.md → Local zones 
 
 - **Zones** (authoritative): for names inside an enabled zone PK95 DNS alone answers (AA bit, SOA/NS, NXDOMAIN
   or NODATA with SOA); nothing of the zone goes to an upstream.
-- **Single records** (no zone): answered before the upstream; other names and types still go upstream.
+- **Single records** (no zone): answered before the upstream without AA bit; other names, and other types of the same
+  name (MX, TXT, …), still go upstream. Exception: a name with an A or AAAA single record answers the other address
+  family with an empty NOERROR (no SOA), so clients never get a public IPv6 next to a local IPv4.
 
 ### Zones
 
@@ -214,8 +218,8 @@ and never blocked by lists. There are two kinds (docs/design.md → Local zones 
 | Route | Body | Answer |
 |---|---|---|
 | `GET /api/zones` | – | `200 [zone…]` ordered by name |
-| `POST /api/zones` | `{"name","ttl","primary_ns","enabled"}` | `201 zone`. Existing single records inside the zone move into it. |
-| `PUT /api/zones/{id}` | same | `200 zone` (renaming moves nothing: `422 fields.name` while the zone has records) |
+| `POST /api/zones` | `{"name","ttl","primary_ns","enabled"}` | `201 zone`. Existing records inside the zone (single records and those of a parent zone) move into it; `422 fields.name` when a CNAME record has the zone name. |
+| `PUT /api/zones/{id}` | same | `200 zone` (renaming moves nothing: `422 fields.name` while the zone has records; an empty zone that is renamed takes over the records below its new name like a new zone) |
 | `DELETE /api/zones/{id}` | – | `204`, removes the zone **and its records** |
 
 - `name`: domain without wildcard, lowercase (normalised), also reverse zones like `168.192.in-addr.arpa`; unique.

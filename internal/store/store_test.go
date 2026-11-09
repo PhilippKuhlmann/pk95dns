@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"pk95dns/internal/config"
+	"pk95dns/internal/records"
 )
 
 func openTest(t *testing.T) *Store {
@@ -321,58 +322,6 @@ func TestCustomRules(t *testing.T) {
 		if err != nil || got != txt {
 			t.Fatalf("got %q %v want %q", got, err, txt)
 		}
-	}
-}
-
-func TestRewrites(t *testing.T) {
-	s := openTest(t)
-	in := []Rewrite{
-		{Domain: "nas.lan", Answer: "192.168.1.10", Enabled: true},
-		{Domain: "*.lan", Answer: "192.168.1.1", Enabled: true},
-		{Domain: "nas.lan", Answer: "fd00::10", Enabled: false},
-	}
-	var created []Rewrite
-	for _, r := range in {
-		c, err := s.CreateRewrite(r)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if c.ID == 0 || c.CreatedAt == 0 {
-			t.Fatalf("created %+v", c)
-		}
-		created = append(created, c)
-	}
-	if _, err := s.CreateRewrite(in[0]); !errors.Is(err, ErrDuplicate) {
-		t.Fatalf("dup: %v", err)
-	}
-	rs, err := s.Rewrites()
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []Rewrite{created[1], created[0], created[2]}
-	if !reflect.DeepEqual(rs, want) {
-		t.Fatalf("got %+v\nwant %+v", rs, want)
-	}
-	upd := created[2]
-	upd.Answer = "192.168.1.10"
-	if err := s.UpdateRewrite(upd); !errors.Is(err, ErrDuplicate) {
-		t.Fatalf("update dup: %v", err)
-	}
-	upd.Answer, upd.Enabled = "fd00::11", true
-	if err := s.UpdateRewrite(upd); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.UpdateRewrite(Rewrite{ID: 99, Domain: "x", Answer: "1.1.1.1"}); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("update missing: %v", err)
-	}
-	if err := s.DeleteRewrite(upd.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.DeleteRewrite(upd.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("delete missing: %v", err)
-	}
-	if rs, _ := s.Rewrites(); len(rs) != 2 {
-		t.Fatalf("after delete: %+v", rs)
 	}
 }
 
@@ -810,7 +759,7 @@ func TestConcurrentWrites(t *testing.T) {
 					errs <- err
 					return
 				}
-				if _, err := s.CreateRewrite(Rewrite{Domain: fmt.Sprintf("h%d-%d", g, i), Answer: "1.2.3.4"}); err != nil {
+				if _, err := s.CreateRecord(records.Record{Name: fmt.Sprintf("h%d-%d.lan", g, i), Type: "A", Value: "1.2.3.4", Enabled: true}); err != nil {
 					errs <- err
 					return
 				}

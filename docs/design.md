@@ -29,11 +29,12 @@ retried every 30 s (`dns.listen_ok` once it works).
 main.go                 env/flags → app.Run
 internal/config         Settings struct, Defaults(), Validate(), Merge (partial PUT)
 internal/filter         rule parser, compiled RuleSet, Engine (atomic snapshots), services catalog,
-                        SafeSearch table, Rewrites table (local records)
+                        SafeSearch table
 internal/upstream       address parsing, plain/DoT/DoH/DoH3/DoQ upstreams, bootstrap, Router (modes,
                         conditional forwarding, private PTR, fallback, health)
 internal/cache          DNS answer cache (LRU, TTL, min/max TTL)
-internal/store          SQLite (modernc.org/sqlite, WAL): settings, lists, custom rules, rewrites,
+internal/records        zones and DNS records: types, validation, compiled lookup Index (Compile, Resolve)
+internal/store          SQLite (modernc.org/sqlite, WAL): settings, lists, custom rules, zones, records,
                         clients, users, sessions, query log, statistics tables
 internal/querylog       buffered writer: batches entries into the store, pruning
 internal/stats          in-memory hourly aggregation, flush to the store, summaries for /api/stats
@@ -86,7 +87,8 @@ every change) and answers lookups; the store keeps `zones` and `records` (docs/a
 
 **Zone answers** (longest enabled zone containing the query name; AA bit set, never forwarded):
 - name with records: matching type → those records; CNAME at the name → CNAME, then the target is resolved
-  (local index first, else cache/upstream, no filtering, max depth 5); other type → NODATA (NOERROR, SOA in authority).
+  (local index first, else cache/upstream, no filtering, max depth 5; a local CNAME loop or a longer chain →
+  SERVFAIL); other type → NODATA (NOERROR, SOA in authority).
 - apex: SOA and NS are synthesized (SOA `<primary_ns> hostmaster.<zone> <serial> 3600 600 604800 <ttl>`).
 - name without records but with records below it (empty non-terminal) → NODATA.
 - otherwise wildcard per RFC 4592: the closest encloser's `*.` child, if any, answers with the query name as owner
@@ -94,14 +96,18 @@ every change) and answers lookups; the store keeps `zones` and `records` (docs/a
 - otherwise NXDOMAIN with the SOA in authority (negative TTL = zone `ttl`).
 
 **Single records** (no zone covers the name): exact name beats the most specific `*.` wildcard; matching type →
-answer; CNAME → chase like above; records but none of this type → empty NOERROR (no SOA); no records → continue
+answer; CNAME → chase like above; A/AAAA asked and the name has only the other address family → empty NOERROR
+(no SOA, split horizon); any other type without records, or no records → continue
 with filtering/cache/upstream (as before).
 
 **Additional section**: for MX and SRV answers the A/AAAA records of the targets from the index (zones and single
 records). **Reverse lookups**: explicit PTR records first, then PTRs synthesized from A/AAAA records with
-`ptr: true` (all names of that address), then the normal private-PTR routing. TXT values over 255 bytes are split
+`ptr: true` (all names of that address; served like a PTR record at the reverse name: inside the reverse zone
+when one covers it – not at all when that zone is disabled –, else as a single record), then the normal
+private-PTR routing. The NS answer at a zone apex also gets the A/AAAA of `primary_ns` from the index. TXT values over 255 bytes are split
 into several strings. TTLs come from the records; local answers are never put into the cache.
-DNSSEC: zones are not signed; DS/DNSKEY/RRSIG queries inside a zone get NODATA. No zone transfers: AXFR/IXFR → REFUSED.
+DNSSEC: zones are not signed; DS/DNSKEY/RRSIG queries inside a zone get NODATA. No zone transfers: AXFR/IXFR for a
+name inside a zone or with single records → REFUSED.
 
 ## Filtering (filter package)
 
@@ -269,7 +275,7 @@ again), `dns.listen_failed` (critical), `dns.listen_ok` (info). Buffered and ret
 ## Core manifest
 
 ```json
-{ "id": "dns", "name": "PK95 DNS", "version": "1.0.0", "protocol": 1, "icon": "shield",
+{ "id": "dns", "name": "PK95 DNS", "version": "1.1.0", "protocol": 1, "icon": "shield",
   "menu": [
     { "key": "overview", "label": "Übersicht", "icon": "home" },
     { "key": "log", "label": "Abfragen", "icon": "list" },

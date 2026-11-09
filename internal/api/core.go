@@ -47,7 +47,7 @@ func ManifestFor(version string) Manifest {
 			{Key: "log", Label: "Abfragen", Icon: "list"},
 			{Key: "lists", Label: "Blocklisten", Icon: "shield"},
 			{Key: "rules", Label: "Eigene Regeln", Icon: "pencil"},
-			{Key: "rewrites", Label: "Lokale Einträge", Icon: "link"},
+			{Key: "records", Label: "DNS-Einträge", Icon: "link"},
 			{Key: "services", Label: "Dienste", Icon: "lock"},
 			{Key: "clients", Label: "Clients", Icon: "user"},
 			{Key: "settings", Label: "Einstellungen", Icon: "cog"},

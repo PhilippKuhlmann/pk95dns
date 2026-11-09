@@ -354,7 +354,7 @@ const ICONS = {
   log: "M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01",
   lists: "M12 3l8 3v6c0 4.5-3.2 7.8-8 9-4.8-1.2-8-4.5-8-9V6z",
   rules: "M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4",
-  rewrites: "M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1",
+  records: "M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01M12 7h4M12 17h4",
   services: "M7 11V8a5 5 0 0 1 10 0v3M6 11h12v9H6zM12 15v1.5",
   clients: "M3 5h13v9H3zM6.5 18h6M9.5 14v4M18 9h3v10h-3z",
   settings: "M4 7h9M17 7h3M4 17h3M11 17h9M15 5v4M9 15v4",
@@ -396,7 +396,9 @@ const REASONS = {
   custom: "Eigene Regel",
   service: "Dienst",
   safesearch: "SafeSearch",
-  rewrite: "Lokaler Eintrag",
+  zone: "Zone",
+  record: "Eigener Eintrag",
+  rewrite: "Lokaler Eintrag", // log entries written before zones and records existed
   access: "Client nicht zugelassen",
   any: "ANY-Anfrage abgelehnt",
   ratelimit: "Ratenlimit überschritten",
@@ -435,6 +437,9 @@ function serviceName(catalog, id) {
   return found ? found.name : id;
 }
 
+// Answered from an own zone or record (pipeline step 5, before any filter rule).
+const isOwnAnswer = (x) => x.status === "rewrite" && (x.reason === "zone" || x.reason === "record");
+
 // Human readable explanation of a log entry or check result.
 function decisionDetail(x, catalog) {
   const parts = [];
@@ -455,7 +460,7 @@ const NAV = [
   ["log", "Abfragen"],
   ["lists", "Blocklisten"],
   ["rules", "Eigene Regeln"],
-  ["rewrites", "Lokale Einträge"],
+  ["records", "DNS-Einträge"],
   ["services", "Dienste"],
   ["clients", "Clients"],
   ["settings", "Einstellungen"],
@@ -611,11 +616,18 @@ function renderShell() {
 
 const VIEWS = {};
 
+// Old addresses that still work (bookmarks): "Lokale Einträge" became "DNS-Einträge".
+const ROUTE_ALIASES = { rewrites: "records" };
+
 function route() {
   if (!me) return;
   document.body.classList.remove("menu-open");
   if (current) { current.dispose(); current = null; }
-  const { name, params } = parseHash();
+  let { name, params } = parseHash();
+  if (ROUTE_ALIASES[name]) {
+    name = ROUTE_ALIASES[name];
+    setHashParams(name, params);
+  }
   const key = VIEWS[name] ? name : "overview";
   for (const [id, link] of Object.entries(navLinks)) {
     if (id === key) link.setAttribute("aria-current", "page");
@@ -878,7 +890,7 @@ VIEWS.overview = function viewOverview(root, params, ctx) {
     const sub = h("div", { class: "protect-sub" });
     const updateSub = () => {
       if (st === "on") sub.textContent = "Werbung, Tracker und gesperrte Dienste werden blockiert.";
-      else if (st === "off") sub.textContent = "Alle Anfragen werden ungefiltert beantwortet. Lokale Einträge gelten weiter.";
+      else if (st === "off") sub.textContent = "Alle Anfragen werden ungefiltert beantwortet. Eigene DNS-Einträge gelten weiter.";
       else {
         const left = p.paused_until - Date.now();
         if (left <= 0) { clearInterval(countdown); loadStatus().catch(() => {}); return; }
@@ -893,7 +905,8 @@ VIEWS.overview = function viewOverview(root, params, ctx) {
     const facts = [
       `${plural(r.list_rules || 0, "Regel", "Regeln")} aus ${plural(r.lists || 0, "Liste", "Listen")}`,
       plural(r.custom_rules || 0, "eigene Regel", "eigene Regeln"),
-      plural(r.rewrites || 0, "lokaler Eintrag", "lokale Einträge"),
+      plural(r.records ?? r.rewrites ?? 0, "DNS-Eintrag", "DNS-Einträge"),
+      r.zones ? plural(r.zones, "Zone", "Zonen") : null,
       plural(r.services || 0, "Dienst gesperrt", "Dienste gesperrt"),
     ];
 
@@ -915,7 +928,7 @@ VIEWS.overview = function viewOverview(root, params, ctx) {
         h("div", { class: "shield" + (st === "on" ? "" : " " + st) }, icon(st === "on" ? ICONS.shieldCheck : ICONS.shieldOff)),
         h("div", { class: "protect-text" },
           h("div", { class: "protect-title" }, title), sub,
-          h("div", { class: "rule-facts" }, facts.join(" · ")))),
+          h("div", { class: "rule-facts" }, facts.filter(Boolean).join(" · ")))),
       h("div", { class: "protect-actions" }, st === "off" ? null : menu.el, sw));
   }
 
@@ -1209,7 +1222,7 @@ VIEWS.log = function viewLog(root, params, ctx) {
   function row(x, fresh) {
     const blocked = x.status === "blocked" || x.status === "blocked_service";
     const detail = decisionDetail(x, catalog);
-    const action = !QUICKABLE.test(x.name || "") ? null : blocked
+    const action = !QUICKABLE.test(x.name || "") || isOwnAnswer(x) ? null : blocked
       ? h("button", { type: "button", class: "small", "aria-label": `${x.name} freigeben`, title: `${x.name} freigeben (eigene Regel @@||${x.name}^)`, onclick: (e) => quick(e.currentTarget, x.name, "allow") }, "Freigeben")
       : h("button", { type: "button", class: "small danger", "aria-label": `${x.name} sperren`, title: `${x.name} sperren (eigene Regel ||${x.name}^)`, onclick: (e) => quick(e.currentTarget, x.name, "block") }, "Sperren");
     return h("tr", { class: fresh ? "fresh" : "" },
@@ -1656,7 +1669,7 @@ VIEWS.rules = function viewRules(root, params, ctx) {
         blocked: "Wird blockiert",
         blocked_service: "Wird blockiert (Dienst)",
         safesearch: "SafeSearch greift",
-        rewrite: "Wird umgeschrieben",
+        rewrite: isOwnAnswer(r) ? "Wird lokal beantwortet" : "Wird umgeschrieben",
         refused: "Wird abgewiesen",
         error: "Fehler",
       }[r.status] || r.status;
@@ -1664,6 +1677,9 @@ VIEWS.rules = function viewRules(root, params, ctx) {
         ok: "Keine Regel greift. Die Anfrage geht an den Upstream-DNS.",
         allowed: "Eine Freigabe-Regel greift, die Anfrage geht an den Upstream-DNS.",
         safesearch: "Die Suchmaschine wird auf ihre jugendfreie Variante umgeleitet.",
+        rewrite: r.reason === "zone"
+          ? "PK95 DNS ist für diese Zone zuständig und antwortet selbst – auch mit „gibt es nicht“. Nichts davon geht an einen Upstream."
+          : r.reason === "record" ? "Ein eigener DNS-Eintrag antwortet, vor Blocklisten und Upstream." : undefined,
       }[r.status];
       const rows = [];
       const add = (k, v) => { if (v) rows.push(h("dt", {}, k), h("dd", {}, v)); };
@@ -1673,7 +1689,10 @@ VIEWS.rules = function viewRules(root, params, ctx) {
       add("Client", r.client_ip ? `${r.client_name ? r.client_name + " – " : ""}${r.client_ip}` : "");
       const blocked = r.status === "blocked" || r.status === "blocked_service";
       const actions = h("div", { class: "form-foot" });
-      if (!dirty()) {
+      if (isOwnAnswer(r)) {
+        // Own records answer before any filter rule, so blocking would change nothing.
+        actions.append(h("a", { href: "#/records?q=" + encodeURIComponent(r.name) }, "In den DNS-Einträgen ansehen"));
+      } else if (!dirty()) {
         actions.append(blocked
           ? h("button", { type: "button", class: "small", onclick: () => quickAndRecheck("allow") }, `${r.name} freigeben`)
           : h("button", { type: "button", class: "small danger", onclick: () => quickAndRecheck("block") }, `${r.name} sperren`));
@@ -1712,117 +1731,367 @@ VIEWS.rules = function viewRules(root, params, ctx) {
   refresh();
 };
 
-// --- Lokale Einträge (rewrites) --------------------------------------------
+// --- DNS-Einträge (zones and records) --------------------------------------
 
-function answerKind(answer) {
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(answer)) return "IPv4";
-  if (answer.includes(":")) return "IPv6";
-  return "CNAME";
+const RECORD_TYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "SRV", "PTR"];
+
+// Per type: label and example of the value, example name, short German help.
+const RECORD_HELP = {
+  A: { value: "IPv4-Adresse", valuePh: "192.168.1.10", namePh: "nas.home.lan", help: "Ordnet einem Namen eine IPv4-Adresse zu, zum Beispiel nas.home.lan → 192.168.1.10." },
+  AAAA: { value: "IPv6-Adresse", valuePh: "fd00::10", namePh: "nas.home.lan", help: "Ordnet einem Namen eine IPv6-Adresse zu." },
+  CNAME: { value: "Ziel (Hostname)", valuePh: "nas.home.lan", namePh: "fotos.home.lan", help: "Alias: Der Name zeigt auf einen anderen Namen, der weiter aufgelöst wird. Ein CNAME steht allein – keine anderen Einträge mit demselben Namen und nicht an der Spitze einer Zone." },
+  MX: { value: "Mailserver (Hostname)", valuePh: "mail.home.lan", namePh: "home.lan", help: "Mailserver der Domain. Gibt es mehrere, wird der mit der kleineren Priorität zuerst versucht." },
+  TXT: { value: "Text", valuePh: "v=spf1 mx -all", namePh: "home.lan", help: "Freier Text, zum Beispiel für SPF, DMARC oder Bestätigungen. Bis 4000 Zeichen." },
+  SRV: { value: "Ziel-Host", valuePh: "dc1.home.lan", namePh: "_ldap._tcp.home.lan", help: "Dienst-Eintrag: sagt Programmen, auf welchem Host und Port ein Dienst läuft. Der Name hat die Form _dienst._protokoll.domain." },
+  PTR: { value: "Hostname", valuePh: "nas.home.lan", namePh: "10.1.168.192.in-addr.arpa", help: "Rückwärtsauflösung: welcher Name zu einer IP-Adresse gehört. Für A- und AAAA-Einträge genügt meist das Häkchen „Rückwärtsauflösung“." },
+};
+
+const NAME_HINTS = {
+  SRV: "Form _dienst._protokoll.domain, zum Beispiel _ldap._tcp.home.lan.",
+  PTR: "Rückwärtsname (…in-addr.arpa / …ip6.arpa). Eine eingegebene IP-Adresse wird umgewandelt.",
+};
+const WILDCARD_HINT = "*.name für alle Unternamen (gilt nicht für name selbst).";
+
+// Zone names under these endings never exist on the internet; everything else may hide a public domain.
+const PRIVATE_ZONE_SUFFIXES = ["lan", "home", "internal", "local", "localdomain", "home.arpa", "test", "example", "invalid", "intranet", "corp", "private", "in-addr.arpa", "ip6.arpa"];
+const PUBLIC_ZONE_WARNING = "Diese Zone überdeckt eine öffentliche Domain – Geräte im Netz sehen dann nicht mehr die Internet-Version.";
+
+const normName = (name) => (name || "").trim().toLowerCase().replace(/\.$/, "");
+
+function isPublicZone(name) {
+  const n = normName(name);
+  return n !== "" && !PRIVATE_ZONE_SUFFIXES.some((x) => n === x || n.endsWith("." + x));
 }
 
-VIEWS.rewrites = function viewRewrites(root, params, ctx) {
-  let rows = [];
-  const filter = h("input", { type: "search", placeholder: "Einträge durchsuchen", "aria-label": "Einträge durchsuchen", spellcheck: false });
+// Longest zone containing the name, like the server derives zone_id.
+function zoneOf(name, zones) {
+  const n = normName(name);
+  let best = null;
+  for (const z of zones) {
+    if ((n === z.name || n.endsWith("." + z.name)) && (!best || z.name.length > best.name.length)) best = z;
+  }
+  return best;
+}
+
+// 192.168.1.10 → 10.1.168.192.in-addr.arpa, fd00::10 → …ip6.arpa; null for anything else.
+function reverseName(ip) {
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+  if (v4) {
+    const parts = v4.slice(1);
+    if (parts.some((o) => Number(o) > 255)) return null;
+    return parts.reverse().map(Number).join(".") + ".in-addr.arpa";
+  }
+  if (!ip.includes(":")) return null;
+  const halves = ip.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 1 ? head.length !== 8 : missing < 1) return null;
+  const groups = [...head, ...Array(halves.length === 2 ? missing : 0).fill("0"), ...tail];
+  if (groups.some((g) => !/^[0-9a-f]{1,4}$/i.test(g))) return null;
+  return groups.map((g) => g.padStart(4, "0").toLowerCase()).join("").split("").reverse().join(".") + ".ip6.arpa";
+}
+
+function recordValue(r) {
+  if (r.type === "MX") return [h("span", { class: "mono" }, r.value), h("span", { class: "cell-sub" }, `Priorität ${r.priority}`)];
+  if (r.type === "SRV") {
+    return [h("span", { class: "mono" }, `${r.value}:${r.port}`),
+      h("span", { class: "cell-sub" }, `Priorität ${r.priority} · Gewicht ${r.weight} · Port ${r.port}`)];
+  }
+  if (r.type === "TXT" && r.value.length > 160) return h("span", { class: "mono txt-value", title: r.value }, r.value.slice(0, 160) + " …");
+  return h("span", { class: r.type === "TXT" ? "mono txt-value" : "mono" }, r.value);
+}
+
+// Short text of a record for confirmations.
+function recordSummary(r) {
+  if (r.type === "MX") return `${r.priority} ${r.value}`;
+  if (r.type === "SRV") return `${r.priority} ${r.weight} ${r.port} ${r.value}`;
+  return r.value.length > 80 ? r.value.slice(0, 80) + " …" : r.value;
+}
+
+// Full body for PUT /api/records/{id}; managed_by is passed through so Core records stay marked.
+const recordBody = (r, changes) => ({
+  name: r.name, type: r.type, value: r.value, ttl: r.ttl, priority: r.priority, weight: r.weight, port: r.port,
+  ptr: r.ptr, enabled: r.enabled, managed_by: r.managed_by || "", ...changes,
+});
+
+const zoneBody = (z, changes) => ({ name: z.name, ttl: z.ttl, primary_ns: z.primary_ns, enabled: z.enabled, ...changes });
+
+const RECORDS_PAGE = 300;
+
+VIEWS.records = function viewRecords(root, params, ctx) {
+  let zones = [];
+  let records = [];
+  let limit = RECORDS_PAGE;
+  let seq = 0;
+  const state = {
+    zone: /^\d+$/.test(params.get("zone") || "") ? params.get("zone") : "",
+    type: RECORD_TYPES.includes(params.get("type")) ? params.get("type") : "",
+    q: params.get("q") || "",
+  };
+
+  const zoneSel = h("select", { "aria-label": "Zone" });
+  const typeSel = h("select", { "aria-label": "Typ" }, h("option", { value: "" }, "Alle Typen"), RECORD_TYPES.map((t) => h("option", { value: t }, t)));
+  typeSel.value = state.type;
+  const search = h("input", { type: "search", placeholder: "Name oder Wert suchen", "aria-label": "Name oder Wert suchen", value: state.q, spellcheck: false, autocapitalize: "none" });
+  const zoneBox = h("div", { class: "list-rows" });
+  const countEl = h("span", { class: "small muted", "aria-live": "polite" });
   const tbody = h("tbody");
-  const table = h("table", { class: "resp-table" },
+  const table = h("table", { class: "resp-table records-table" },
     h("thead", {}, h("tr", {},
-      h("th", { scope: "col" }, "Aktiv"), h("th", { scope: "col" }, "Domain"), h("th", { scope: "col" }, "Antwort"),
+      h("th", { scope: "col" }, "Aktiv"), h("th", { scope: "col" }, "Name"), h("th", { scope: "col" }, "Typ"),
+      h("th", { scope: "col" }, "Wert"), h("th", { scope: "col", class: "num" }, "TTL"), h("th", { scope: "col" }, "Status"),
       h("th", { scope: "col" }, h("span", { class: "sr-only" }, "Aktionen")))),
     tbody);
   const emptyBox = h("div", { class: "empty-state", hidden: true });
+  const moreBox = h("div", { class: "log-foot", hidden: true });
   const errorBox = h("div");
+  const recordsCard = h("section", { class: "card", "aria-labelledby": "records-h" },
+    h("div", { class: "card-head" }, h("h2", { id: "records-h" }, "Einträge"), countEl),
+    h("div", { class: "filters" }, zoneSel, typeSel, search),
+    h("div", { class: "table-wrap" }, table, emptyBox),
+    moreBox);
 
   root.append(
-    h("div", { class: "page-head" }, h("h1", {}, "Lokale Einträge"),
-      h("div", { class: "actions" }, h("button", { type: "button", class: "primary", onclick: () => editDialog(null) }, icon(ICONS.plus), "Eintrag hinzufügen"))),
-    h("p", { class: "page-intro" }, "Eigene DNS-Antworten für Geräte im Heimnetz, zum Beispiel nas.home.lan → 192.168.1.10. Sie gelten immer, auch wenn der Schutz pausiert ist."),
+    h("div", { class: "page-head" }, h("h1", {}, "DNS-Einträge"),
+      h("div", { class: "actions" },
+        h("button", { type: "button", onclick: () => zoneDialog(null) }, icon(ICONS.plus), "Zone hinzufügen"),
+        h("button", { type: "button", class: "primary", onclick: () => recordDialog(null) }, icon(ICONS.plus), "Eintrag hinzufügen"))),
+    h("p", { class: "page-intro" }, "Eigene DNS-Einträge für dein Netz: A, AAAA, CNAME, MX, TXT, SRV und PTR. PK95 DNS beantwortet sie selbst – vor Blocklisten, Cache und Upstream, auch wenn der Schutz pausiert ist."),
     errorBox,
-    h("div", { class: "grid-2" },
-      h("section", { class: "card", style: "grid-column: 1 / -1" },
-        h("div", { class: "filters" }, filter),
-        h("div", { class: "table-wrap" }, table, emptyBox)),
-      h("section", { class: "card", style: "grid-column: 1 / -1" },
+    h("div", { class: "stack" },
+      h("section", { class: "card", "aria-labelledby": "zones-h" },
+        h("div", { class: "card-head" }, h("h2", { id: "zones-h" }, "Zonen"),
+          h("button", { type: "button", class: "small", onclick: () => zoneDialog(null) }, icon(ICONS.plus), "Zone hinzufügen")),
+        h("p", { class: "card-intro" }, "Mit einer Zone ist PK95 DNS für eine ganze Domain zuständig, zum Beispiel home.lan: Alle Namen darin beantwortet nur PK95 DNS, Namen ohne Eintrag gibt es dann nicht. Einträge außerhalb jeder Zone sind Einzeleinträge – sie beantworten nur genau ihren Namen und Typ. Andere Typen dieses Namens (etwa MX) und alle anderen Namen fragt PK95 DNS weiter beim Upstream; nur die zweite Adressfamilie (IPv6 neben einer lokalen IPv4) bleibt leer."),
+        zoneBox),
+      recordsCard,
+      h("section", { class: "card" },
         h("h2", {}, "Gut zu wissen"),
-        h("ul", { class: "ink-2", style: "margin:0;padding-left:18px;display:grid;gap:4px" },
-          h("li", {}, h("code", {}, "*.home.lan"), " gilt für alle Subdomains, aber nicht für ", h("code", {}, "home.lan"), " selbst. Genaue Einträge haben Vorrang vor Platzhaltern."),
-          h("li", {}, "Eine IPv4-Adresse beantwortet A-Anfragen, eine IPv6-Adresse AAAA-Anfragen. Mehrere Einträge für dieselbe Domain sind möglich."),
-          h("li", {}, "Ein Hostname als Antwort wird als CNAME ausgeliefert und weiter aufgelöst, zum Beispiel ", h("code", {}, "fotos.home.lan → nas.home.lan"), ".")))));
-  filter.addEventListener("input", render);
+        h("ul", { class: "ink-2 notes" },
+          h("li", {}, h("code", {}, "*.home.lan"), " gilt für alle Unternamen, aber nicht für ", h("code", {}, "home.lan"), " selbst. Genaue Einträge haben Vorrang vor Platzhaltern."),
+          h("li", {}, "Mit dem Häkchen „Rückwärtsauflösung“ bei A und AAAA findet ein Gerät zur IP-Adresse den Namen – ein eigener PTR-Eintrag für dieselbe Adresse geht vor."),
+          h("li", {}, "Ein CNAME wird weiter aufgelöst, zum Beispiel ", h("code", {}, "fotos.home.lan → nas.home.lan"), ". Daneben darf es keine anderen Einträge mit demselben Namen geben."),
+          h("li", {}, "Eigene Einträge werden nie von Blocklisten gesperrt. Zonen werden nicht signiert (kein DNSSEC) und nicht übertragen (kein AXFR).")))));
 
+  function syncUrl() {
+    const p = new URLSearchParams();
+    if (state.zone) p.set("zone", state.zone);
+    if (state.type) p.set("type", state.type);
+    if (state.q) p.set("q", state.q);
+    setHashParams("records", p);
+  }
+
+  const changed = () => {
+    state.zone = zoneSel.value;
+    state.type = typeSel.value;
+    state.q = search.value.trim();
+    limit = RECORDS_PAGE;
+    syncUrl();
+    load();
+  };
+  zoneSel.addEventListener("change", changed);
+  typeSel.addEventListener("change", changed);
+  search.addEventListener("input", debounce(changed, 300));
+
+  function showZone(id) {
+    zoneSel.value = id;
+    changed();
+    recordsCard.scrollIntoView({ block: "start", behavior: "smooth" });
+  }
+
+  // Zones and records together: counts, serials and the zone column depend on each other.
   async function load() {
+    const my = ++seq;
+    const q = new URLSearchParams();
+    if (state.zone) q.set("zone_id", state.zone);
+    if (state.type) q.set("type", state.type);
+    if (state.q) q.set("q", state.q);
+    const qs = q.toString();
     try {
-      rows = await ctx.api("rewrites");
+      const [z, r] = await Promise.all([ctx.api("zones"), ctx.api("records" + (qs ? "?" + qs : ""))]);
+      if (my !== seq) return;
+      zones = z || [];
+      records = r || [];
+      if (state.zone && state.zone !== "0" && !zones.some((x) => String(x.id) === state.zone)) {
+        state.zone = "";
+        syncUrl();
+        load();
+        return;
+      }
       errorBox.replaceChildren();
-      render();
+      renderZones();
+      renderRecords();
     } catch (e) {
-      if (!isAbort(e)) errorBox.replaceChildren(banner("error", "Die lokalen Einträge konnten nicht geladen werden.", e.message));
+      if (!isAbort(e) && my === seq) errorBox.replaceChildren(banner("error", "Die DNS-Einträge konnten nicht geladen werden.", e.message));
     }
   }
 
-  function render() {
-    const q = filter.value.trim().toLowerCase();
-    const shown = rows.filter((r) => !q || r.domain.toLowerCase().includes(q) || r.answer.toLowerCase().includes(q));
-    tbody.replaceChildren(...shown.map((r) => {
-      const sw = toggle(`${r.domain} aktiv`, r.enabled, {
-        onchange: async () => {
-          sw.input.disabled = true;
-          try {
-            const saved = await ctx.api("rewrites/" + r.id, { method: "PUT", body: { domain: r.domain, answer: r.answer, enabled: sw.input.checked } });
-            Object.assign(r, saved);
-            render();
-          } catch (e) {
-            sw.input.checked = !sw.input.checked;
-            toastError(e);
-            sw.input.disabled = false;
-          }
-        },
-      });
-      sw.el.querySelector("span").className = "sr-only";
-      return h("tr", { class: r.enabled ? "" : "off" },
-        h("td", { style: "width:60px" }, sw.el),
-        h("td", { class: "wrap", "data-label": "Domain" }, h("strong", {}, r.domain)),
-        h("td", { class: "wrap", "data-label": "Antwort" }, h("span", { class: "mono" }, r.answer), " ", h("span", { class: "tag" }, answerKind(r.answer))),
-        h("td", { class: "actions-cell" }, h("div", { class: "row-actions" },
-          h("button", { type: "button", class: "small", onclick: () => editDialog(r) }, "Bearbeiten"),
-          h("button", { type: "button", class: "small danger", onclick: () => remove(r) }, "Löschen"))));
-    }));
-    table.hidden = shown.length === 0;
-    emptyBox.hidden = shown.length > 0;
-    fill(emptyBox, rows.length
-      ? h("p", {}, "Kein Eintrag passt zur Suche.")
-      : [h("h2", {}, "Noch keine lokalen Einträge"), h("p", {}, "Lege Namen für Geräte in deinem Netz an, dann musst du dir keine IP-Adressen merken.")]);
+  function renderZones() {
+    fill(zoneSel,
+      h("option", { value: "" }, "Alle Einträge"),
+      h("option", { value: "0" }, "Einzeleinträge (ohne Zone)"),
+      zones.map((z) => h("option", { value: String(z.id) }, "Zone " + z.name)));
+    zoneSel.value = state.zone;
+    fill(zoneBox, zones.length ? zones.map(zoneRow)
+      : h("p", { class: "empty" }, "Noch keine Zone. Einzeleinträge funktionieren auch ohne – eine Zone brauchst du, wenn PK95 DNS für eine ganze Domain allein zuständig sein soll."));
   }
 
-  function remove(r) {
+  function zoneRow(z) {
+    const sw = toggle(`Zone ${z.name} aktiv`, z.enabled, {
+      onchange: async () => {
+        sw.input.disabled = true;
+        try {
+          await ctx.api("zones/" + z.id, { method: "PUT", body: zoneBody(z, { enabled: sw.input.checked }) });
+          toast(sw.input.checked ? `Zone ${z.name} ist aktiv.` : `Zone ${z.name} ist ausgeschaltet.`);
+          load();
+        } catch (e) {
+          sw.input.checked = !sw.input.checked;
+          toastError(e);
+          sw.input.disabled = false;
+        }
+      },
+    });
+    sw.el.querySelector("span").className = "sr-only";
+    const pub = isPublicZone(z.name);
+    return h("div", { class: "list-row" + (z.enabled ? "" : " off") },
+      sw.el,
+      h("div", { class: "list-text" },
+        h("div", { class: "list-name" },
+          h("a", { href: "#/records?zone=" + z.id, title: "Einträge dieser Zone zeigen", onclick: (e) => { e.preventDefault(); showZone(String(z.id)); } }, z.name),
+          z.enabled ? null : h("span", { class: "badge" }, "Aus"),
+          pub ? h("span", { class: "badge warn" }, "Öffentliche Domain") : null),
+        h("div", { class: "list-meta" },
+          h("span", {}, plural(z.record_count || 0, "Eintrag", "Einträge")),
+          h("span", { title: "Seriennummer, steigt mit jeder Änderung" }, "Serial " + z.serial),
+          h("span", {}, `TTL ${nf.format(z.ttl)} s`),
+          h("span", {}, "NS " + z.primary_ns)),
+        pub ? h("div", { class: "small warn-text" }, PUBLIC_ZONE_WARNING) : null),
+      h("div", { class: "row-actions" },
+        h("button", { type: "button", class: "icon-only small ghost", title: "Bearbeiten", "aria-label": `Zone ${z.name} bearbeiten`, onclick: () => zoneDialog(z) }, icon(ICONS.edit)),
+        h("button", { type: "button", class: "icon-only small ghost danger", title: "Entfernen", "aria-label": `Zone ${z.name} entfernen`, onclick: () => removeZone(z) }, icon(ICONS.trash))));
+  }
+
+  function removeZone(z) {
+    const n = z.record_count || 0;
     confirmDialog({
-      title: `${r.domain} löschen?`,
-      text: `Der Eintrag ${r.domain} → ${r.answer} wird gelöscht.`,
-      confirm: "Löschen",
+      title: `Zone ${z.name} entfernen?`,
+      text: (n ? `Die Zone und ${n === 1 ? "ihr Eintrag werden" : `ihre ${nf.format(n)} Einträge werden`} gelöscht.` : "Die Zone ist leer und wird gelöscht.")
+        + ` Namen unter ${z.name} fragt PK95 DNS danach wieder beim Upstream an.`,
+      confirm: n ? `Zone und ${plural(n, "Eintrag", "Einträge")} löschen` : "Zone löschen",
       action: async () => {
-        await ctx.api("rewrites/" + r.id, { method: "DELETE" });
-        toast(`${r.domain} gelöscht.`);
+        await ctx.api("zones/" + z.id, { method: "DELETE" });
+        toast(n ? `Zone ${z.name} und ${plural(n, "Eintrag", "Einträge")} gelöscht.` : `Zone ${z.name} gelöscht.`);
+        if (state.zone === String(z.id)) { state.zone = ""; syncUrl(); }
         load();
       },
     });
   }
 
-  function editDialog(r) {
+  function renderRecords() {
+    const filtered = !!(state.zone || state.type || state.q);
+    countEl.textContent = records.length ? plural(records.length, "Eintrag", "Einträge") : "";
+    tbody.replaceChildren(...records.slice(0, limit).map(recordRow));
+    table.hidden = records.length === 0;
+    emptyBox.hidden = records.length > 0;
+    fill(emptyBox, filtered
+      ? [h("h2", {}, "Keine passenden Einträge"), h("p", {}, "Ändere die Filter oder suche nach einem anderen Begriff."),
+        h("button", { type: "button", onclick: () => { zoneSel.value = ""; typeSel.value = ""; search.value = ""; changed(); } }, "Filter zurücksetzen")]
+      : [h("h2", {}, "Noch keine DNS-Einträge"), h("p", {}, "Lege Namen für Geräte in deinem Netz an, zum Beispiel nas.home.lan → 192.168.1.10. Dann musst du dir keine IP-Adressen merken."),
+        h("button", { type: "button", class: "primary", onclick: () => recordDialog(null) }, icon(ICONS.plus), "Eintrag hinzufügen")]);
+    const rest = records.length - limit;
+    moreBox.hidden = rest <= 0;
+    fill(moreBox, rest > 0 ? [h("span", { class: "small muted" }, `${nf.format(limit)} von ${nf.format(records.length)} angezeigt`),
+      h("button", { type: "button", onclick: () => { limit += RECORDS_PAGE; renderRecords(); } }, `Weitere ${nf.format(Math.min(rest, RECORDS_PAGE))} anzeigen`)] : null);
+  }
+
+  function recordRow(r) {
+    const zone = zones.find((z) => z.id === r.zone_id);
+    const zoneOff = !!zone && !zone.enabled;
+    const sw = toggle(`${r.name} (${r.type}) aktiv`, r.enabled, {
+      onchange: async () => {
+        sw.input.disabled = true;
+        try {
+          const saved = await ctx.api("records/" + r.id, { method: "PUT", body: recordBody(r, { enabled: sw.input.checked }) });
+          Object.assign(r, saved);
+          load();
+        } catch (e) {
+          sw.input.checked = !sw.input.checked;
+          toastError(e);
+          sw.input.disabled = false;
+        }
+      },
+    });
+    sw.el.querySelector("span").className = "sr-only";
+    const stateBadge = !r.enabled ? h("span", { class: "badge" }, "Aus")
+      : zoneOff ? h("span", { class: "badge warn", title: `Die Zone ${zone.name} ist ausgeschaltet` }, "Zone aus")
+        : h("span", { class: "badge good" }, "Aktiv");
+    return h("tr", { class: r.enabled && !zoneOff ? "" : "off" },
+      h("td", { style: "width:60px" }, sw.el),
+      h("td", { class: "wrap name-cell", "data-label": "Name" }, h("strong", {}, r.name),
+        h("span", { class: "cell-sub" }, zone ? "Zone " + zone.name : "Einzeleintrag")),
+      h("td", { "data-label": "Typ" }, h("span", { class: "rtype" }, r.type)),
+      h("td", { class: "wrap value-cell", "data-label": "Wert" }, recordValue(r)),
+      h("td", { class: "num", "data-label": "TTL" }, `${nf.format(r.ttl)} s`),
+      h("td", { "data-label": "Status" }, h("span", { class: "badges" },
+        stateBadge,
+        r.ptr && (r.type === "A" || r.type === "AAAA") ? h("span", { class: "badge info", title: "Rückwärtsauflösung (PTR) automatisch" }, "+ PTR") : null,
+        r.managed_by === "core" ? h("span", { class: "badge info", title: "Von PK95 Core für eine App angelegt" }, "von Core") : null)),
+      h("td", { class: "actions-cell" }, h("div", { class: "row-actions" },
+        h("button", { type: "button", class: "icon-only small ghost", title: "Bearbeiten", "aria-label": `${r.name} (${r.type}) bearbeiten`, onclick: () => recordDialog(r) }, icon(ICONS.edit)),
+        h("button", { type: "button", class: "icon-only small ghost danger", title: "Löschen", "aria-label": `${r.name} (${r.type}) löschen`, onclick: () => removeRecord(r) }, icon(ICONS.trash)))));
+  }
+
+  function removeRecord(r) {
+    confirmDialog({
+      title: `${r.name} (${r.type}) löschen?`,
+      text: `Der Eintrag ${r.name} ${r.type} ${recordSummary(r)} wird gelöscht.` + (r.managed_by === "core" ? " PK95 Core hat ihn für eine App angelegt." : ""),
+      confirm: "Löschen",
+      action: async () => {
+        await ctx.api("records/" + r.id, { method: "DELETE" });
+        toast(`${r.name} (${r.type}) gelöscht.`);
+        load();
+      },
+    });
+  }
+
+  function zoneDialog(z) {
     const general = h("div", { class: "form-error", role: "alert", hidden: true });
     const scope = errorScope(general);
-    const domain = h("input", { type: "text", value: r ? r.domain : "", placeholder: "nas.home.lan oder *.home.lan", spellcheck: false, autocapitalize: "none", required: true });
-    const answer = h("input", { type: "text", value: r ? r.answer : "", placeholder: "192.168.1.10, fd00::10 oder nas.home.lan", spellcheck: false, autocapitalize: "none", required: true });
-    const enabled = toggle("Aktiv", r ? r.enabled : true);
-    const save = h("button", { type: "submit", class: "primary" }, r ? "Speichern" : "Hinzufügen");
+    const name = h("input", { type: "text", value: z ? z.name : "", placeholder: "home.lan", spellcheck: false, autocapitalize: "none", required: true });
+    const ttl = h("input", { type: "number", inputMode: "numeric", min: 0, max: 604800, step: 1, value: String(z ? z.ttl : 300) });
+    const ns = h("input", { type: "text", value: z ? z.primary_ns : "", spellcheck: false, autocapitalize: "none" });
+    const enabled = toggle("Aktiv", z ? z.enabled : true);
+    const warn = h("div", { "aria-live": "polite" });
+    const update = () => {
+      const n = normName(name.value);
+      ns.placeholder = "ns." + (n || "home.lan");
+      fill(warn, isPublicZone(n) ? banner("", "Öffentliche Domain", PUBLIC_ZONE_WARNING) : null);
+    };
+    name.addEventListener("input", update);
+    update();
+    const save = h("button", { type: "submit", class: "primary" }, z ? "Speichern" : "Zone anlegen");
     const form = h("form", {
       class: "stack",
+      noValidate: true,
       onsubmit: async (e) => {
         e.preventDefault();
         scope.clear();
+        let body;
+        try {
+          body = { name: name.value.trim(), ttl: numberValue(ttl, "ttl"), primary_ns: ns.value.trim(), enabled: enabled.input.checked };
+        } catch (ex) {
+          if (ex instanceof FieldError) { scope.show({ fields: { [ex.key]: ex.message }, message: "" }); return; }
+          throw ex;
+        }
         save.disabled = true;
         try {
-          await ctx.api(r ? "rewrites/" + r.id : "rewrites", { method: r ? "PUT" : "POST", body: { domain: domain.value.trim(), answer: answer.value.trim(), enabled: enabled.input.checked } });
+          const saved = await ctx.api(z ? "zones/" + z.id : "zones", { method: z ? "PUT" : "POST", body });
           dlg.close();
-          toast(r ? "Eintrag gespeichert." : "Eintrag hinzugefügt.");
+          if (z) toast(`Zone ${saved.name} gespeichert.`);
+          else if (saved.record_count) toast(`Zone ${saved.name} angelegt. ${plural(saved.record_count, "vorhandener Eintrag gehört", "vorhandene Einträge gehören")} jetzt dazu.`);
+          else toast(`Zone ${saved.name} angelegt.`);
           load();
         } catch (ex) {
           if (isAbort(ex)) return;
@@ -1831,13 +2100,162 @@ VIEWS.rewrites = function viewRewrites(root, params, ctx) {
         }
       },
     },
+      h("p", { class: "ink-2" }, "Für alle Namen in dieser Zone antwortet nur PK95 DNS. Namen ohne Eintrag gibt es dann nicht (NXDOMAIN) – auch wenn sie im Internet existieren."),
       general,
-      field(scope, "domain", "Domain", domain, { hint: "*.home.lan gilt für alle Subdomains, nicht für home.lan selbst." }),
-      field(scope, "answer", "Antwort", answer, { hint: "IPv4- oder IPv6-Adresse, oder ein Hostname (wird als CNAME beantwortet)." }),
+      field(scope, "name", "Name der Zone", name, {
+        hint: z && z.record_count
+          ? "Umbenennen geht nur, solange die Zone keine Einträge hat."
+          : "Zum Beispiel home.lan, oder 1.168.192.in-addr.arpa für die Rückwärtsauflösung eines Netzes. Vorhandene Einzeleinträge darunter wandern in die Zone.",
+      }),
+      warn,
+      h("div", { class: "form-grid" },
+        field(scope, "ttl", "TTL (Sekunden)", ttl, { hint: "Für SOA und NS und wie lange „gibt es nicht“ gemerkt wird. Standard 300." }),
+        field(scope, "primary_ns", "Primärer Nameserver", ns, { hint: "Leer lassen für ns.<zone>. Steht im SOA- und NS-Eintrag." })),
       enabled.el,
       h("div", { class: "dialog-foot" }, h("button", { type: "button", onclick: () => dlg.close() }, "Abbrechen"), save));
-    const dlg = openDialog(r ? "Eintrag bearbeiten" : "Lokaler Eintrag", form);
-    domain.focus();
+    const dlg = openDialog(z ? "Zone bearbeiten" : "Zone hinzufügen", form);
+    name.focus();
+  }
+
+  function recordDialog(r) {
+    const general = h("div", { class: "form-error", role: "alert", hidden: true });
+    const scope = errorScope(general);
+    const presetZone = !r && state.zone && state.zone !== "0" ? zones.find((z) => String(z.id) === state.zone) : null;
+    const type = h("select", {}, RECORD_TYPES.map((t) => h("option", { value: t }, t)));
+    type.value = r ? r.type : state.type || "A";
+    const name = h("input", { type: "text", value: r ? r.name : "", spellcheck: false, autocapitalize: "none", autocomplete: "off", required: true });
+    const nameField = field(scope, "name", "Name", name, { hint: WILDCARD_HINT });
+    const nameHint = nameField.querySelector(".hint");
+    const zoneNote = h("div", { class: "hint zone-note", id: nextId("zn") });
+    nameField.insertBefore(zoneNote, nameHint.nextSibling);
+    name.setAttribute("aria-describedby", name.getAttribute("aria-describedby") + " " + zoneNote.id);
+
+    // The value is a one-line input, or a textarea for TXT; both share one label and error slot.
+    const valueInput = h("input", { type: "text", id: nextId("i"), spellcheck: false, autocapitalize: "none", autocomplete: "off" });
+    const valueText = h("textarea", { id: nextId("i"), rows: 4, maxLength: 4000, spellcheck: false, class: "mono" });
+    if (r) (r.type === "TXT" ? valueText : valueInput).value = r.value;
+    const valueLabel = h("label", {});
+    const valueHint = h("div", { class: "hint", id: nextId("vh") });
+    const valueErr = h("div", { class: "field-error", id: nextId("ve"), role: "alert", hidden: true });
+    const activeValue = () => (type.value === "TXT" ? valueText : valueInput);
+    for (const c of [valueInput, valueText]) {
+      c.setAttribute("aria-describedby", valueHint.id + " " + valueErr.id);
+      c.addEventListener("input", () => { valueErr.hidden = true; valueErr.textContent = ""; c.removeAttribute("aria-invalid"); });
+    }
+    scope.register("value", { err: valueErr, inputsFor: () => [activeValue()] });
+    const valueField = h("div", { class: "field" }, valueLabel, valueInput, valueText, valueHint, valueErr);
+
+    const num = (key, v) => h("input", { type: "number", inputMode: "numeric", min: key === "port" ? 1 : 0, max: key === "ttl" ? 604800 : 65535, step: 1, value: String(v) });
+    const priority = num("priority", r ? r.priority : 10);
+    const weight = num("weight", r ? r.weight : 0);
+    const port = num("port", r && r.port ? r.port : "");
+    const ttl = num("ttl", r ? r.ttl : 300);
+    const priorityField = field(scope, "priority", "Priorität", priority, { hint: "0–65535, kleiner = zuerst." });
+    const weightField = field(scope, "weight", "Gewichtung", weight, { hint: "Verteilung bei gleicher Priorität." });
+    const portField = field(scope, "port", "Port", port, { hint: "1–65535" });
+    const ttlField = field(scope, "ttl", "TTL (Sekunden)", ttl, { hint: "Standard 300 (5 Minuten)." });
+
+    const ptr = toggle("Rückwärtsauflösung (PTR) automatisch", r ? r.ptr : false, { plain: true, hint: "Fragt ein Gerät nach dem Namen zu dieser Adresse, antwortet PK95 DNS mit diesem Namen." });
+    const ptrErr = h("div", { class: "field-error", role: "alert", hidden: true });
+    scope.register("ptr", { err: ptrErr, inputs: [ptr.input] });
+    const ptrBox = h("div", { class: "field" }, ptr.el, ptrErr);
+    const enabled = toggle("Aktiv", r ? r.enabled : true);
+    const enabledErr = h("div", { class: "field-error", role: "alert", hidden: true });
+    scope.register("enabled", { err: enabledErr, inputs: [enabled.input] });
+    const typeHelp = h("p", { class: "type-help", "aria-live": "polite" });
+
+    const updateZone = () => {
+      const n = normName(name.value);
+      const z = n ? zoneOf(n, zones) : null;
+      zoneNote.textContent = !n ? "" : z ? `Gehört zur Zone ${z.name}${z.enabled ? "" : " (ausgeschaltet)"}.` : "Einzeleintrag – keine Zone deckt diesen Namen ab.";
+    };
+    let lastType = type.value;
+    const update = () => {
+      const t = type.value;
+      const help = RECORD_HELP[t];
+      // Keep what was typed when switching between input and textarea.
+      if ((lastType === "TXT") !== (t === "TXT")) {
+        if (t === "TXT") valueText.value = valueInput.value; else valueInput.value = valueText.value.replace(/\s*\n\s*/g, " ");
+      }
+      lastType = t;
+      typeHelp.textContent = help.help;
+      name.placeholder = presetZone && t !== "PTR" && t !== "SRV" ? "host." + presetZone.name : help.namePh;
+      nameHint.textContent = NAME_HINTS[t] || WILDCARD_HINT;
+      valueLabel.textContent = help.value;
+      valueLabel.htmlFor = activeValue().id;
+      valueInput.placeholder = help.valuePh;
+      valueText.placeholder = help.valuePh;
+      valueInput.hidden = t === "TXT";
+      valueText.hidden = t !== "TXT";
+      valueHint.textContent = t === "TXT" ? "Längere Texte werden in der Antwort automatisch in Stücke zu 255 Bytes geteilt." : t === "CNAME" || t === "MX" || t === "SRV" || t === "PTR" ? "Ein Hostname, keine IP-Adresse." : "";
+      valueHint.hidden = !valueHint.textContent;
+      priorityField.hidden = t !== "MX" && t !== "SRV";
+      weightField.hidden = t !== "SRV";
+      portField.hidden = t !== "SRV";
+      ptrBox.hidden = t !== "A" && t !== "AAAA";
+    };
+    // For PTR an IP address typed as name becomes its reverse name.
+    const toReverse = () => {
+      if (type.value !== "PTR") return;
+      const rev = reverseName(name.value.trim());
+      if (rev) { name.value = rev; updateZone(); }
+    };
+    type.addEventListener("change", () => { update(); toReverse(); });
+    name.addEventListener("input", updateZone);
+    name.addEventListener("blur", toReverse);
+    update();
+    updateZone();
+
+    const save = h("button", { type: "submit", class: "primary" }, r ? "Speichern" : "Hinzufügen");
+    const form = h("form", {
+      class: "stack",
+      noValidate: true,
+      onsubmit: async (e) => {
+        e.preventDefault();
+        scope.clear();
+        const t = type.value;
+        const local = {};
+        const numOr0 = (input, key, used) => {
+          if (!used) return 0;
+          try { return numberValue(input, key); } catch (ex) { if (ex instanceof FieldError) { local[key] = ex.message; return 0; } throw ex; }
+        };
+        const body = {
+          name: name.value.trim(),
+          type: t,
+          value: t === "TXT" ? activeValue().value : activeValue().value.trim(),
+          ttl: numOr0(ttl, "ttl", true),
+          priority: numOr0(priority, "priority", t === "MX" || t === "SRV"),
+          weight: numOr0(weight, "weight", t === "SRV"),
+          port: numOr0(port, "port", t === "SRV"),
+          ptr: (t === "A" || t === "AAAA") && ptr.input.checked,
+          enabled: enabled.input.checked,
+          managed_by: r ? r.managed_by || "" : "",
+        };
+        if (Object.keys(local).length) { scope.show({ fields: local, message: "" }); return; }
+        save.disabled = true;
+        try {
+          await ctx.api(r ? "records/" + r.id : "records", { method: r ? "PUT" : "POST", body });
+          dlg.close();
+          toast(r ? "Eintrag gespeichert." : `${body.name} (${t}) hinzugefügt.`);
+          load();
+        } catch (ex) {
+          if (isAbort(ex)) return;
+          scope.show(ex);
+          save.disabled = false;
+        }
+      },
+    },
+      r && r.managed_by === "core" ? banner("info", "Von PK95 Core angelegt", "PK95 Core hat diesen Eintrag für eine App angelegt. Änderungen hier kann Core beim nächsten Abgleich überschreiben.") : null,
+      general,
+      h("div", { class: "rec-head" }, field(scope, "type", "Typ", type), nameField),
+      typeHelp,
+      valueField,
+      h("div", { class: "form-grid-3" }, priorityField, weightField, portField, ttlField),
+      ptrBox,
+      h("div", { class: "field" }, enabled.el, enabledErr),
+      h("div", { class: "dialog-foot" }, h("button", { type: "button", onclick: () => dlg.close() }, "Abbrechen"), save));
+    const dlg = openDialog(r ? "Eintrag bearbeiten" : "DNS-Eintrag hinzufügen", form);
+    (r ? activeValue() : name).focus();
   }
 
   load();

@@ -1,6 +1,6 @@
 // Package store is the SQLite storage of PK95 DNS (modernc.org/sqlite, WAL, busy_timeout):
-// settings, lists, custom rules, local records, clients, users, sessions, query log and
-// statistics (docs/design.md → Storage). Times are unix milliseconds unless noted.
+// settings, lists, custom rules, DNS zones and records, clients, users, sessions, query log
+// and statistics (docs/design.md → Storage). Times are unix milliseconds unless noted.
 package store
 
 import (
@@ -219,56 +219,6 @@ func (s *Store) SaveCustomRules(text string) error {
 	_, err := s.DB.Exec(`INSERT INTO custom_rules (id, text, updated_at) VALUES (1, ?, ?)
 		ON CONFLICT (id) DO UPDATE SET text = excluded.text, updated_at = excluded.updated_at`, text, nowMS())
 	return err
-}
-
-// Rewrite is a local DNS record.
-type Rewrite struct {
-	ID        int64  `json:"id"`
-	Domain    string `json:"domain"`
-	Answer    string `json:"answer"`
-	Enabled   bool   `json:"enabled"`
-	CreatedAt int64  `json:"created_at"`
-}
-
-// Rewrites returns all records ordered by domain, then answer.
-func (s *Store) Rewrites() ([]Rewrite, error) {
-	rows, err := s.DB.Query(`SELECT id, domain, answer, enabled, created_at FROM rewrites ORDER BY domain, answer, id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []Rewrite{}
-	for rows.Next() {
-		var r Rewrite
-		if err := rows.Scan(&r.ID, &r.Domain, &r.Answer, &r.Enabled, &r.CreatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
-}
-
-// CreateRewrite inserts r. ErrDuplicate for the same domain+answer.
-func (s *Store) CreateRewrite(r Rewrite) (Rewrite, error) {
-	r.CreatedAt = nowMS()
-	res, err := s.DB.Exec(`INSERT INTO rewrites (domain, answer, enabled, created_at) VALUES (?, ?, ?, ?)`,
-		r.Domain, r.Answer, boolInt(r.Enabled), r.CreatedAt)
-	if err != nil {
-		return Rewrite{}, mapErr(err)
-	}
-	r.ID, err = res.LastInsertId()
-	return r, err
-}
-
-// UpdateRewrite stores domain, answer, enabled. ErrNotFound / ErrDuplicate.
-func (s *Store) UpdateRewrite(r Rewrite) error {
-	return affected(s.DB.Exec(`UPDATE rewrites SET domain = ?, answer = ?, enabled = ? WHERE id = ?`,
-		r.Domain, r.Answer, boolInt(r.Enabled), r.ID))
-}
-
-// DeleteRewrite removes a record. ErrNotFound.
-func (s *Store) DeleteRewrite(id int64) error {
-	return affected(s.DB.Exec(`DELETE FROM rewrites WHERE id = ?`, id))
 }
 
 // Client is a configured client.

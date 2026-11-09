@@ -8,22 +8,16 @@ import (
 	"time"
 
 	"pk95dns/internal/config"
-	"pk95dns/internal/filter"
+	"pk95dns/internal/records"
 	"pk95dns/internal/store"
 	"pk95dns/internal/upstream"
 )
-
-// localTTL is the TTL of answers from local DNS records.
-const localTTL = 60
-
-// maxCNAMEDepth limits CNAME chasing through local records.
-const maxCNAMEDepth = 5
 
 // state is the compiled form of a Runtime. Immutable after compile.
 type state struct {
 	settings config.Settings
 	router   *upstream.Router
-	rewrites *filter.Rewrites
+	index    *records.Index // own zones and records (nil: none)
 
 	allowed    prefixSet
 	disallowed prefixSet
@@ -185,7 +179,7 @@ func compile(rt Runtime) *state {
 	st := &state{
 		settings:   cfg,
 		router:     rt.Router,
-		rewrites:   rt.Rewrites,
+		index:      rt.Records,
 		allowed:    compilePrefixes(cfg.AllowedClients),
 		disallowed: compilePrefixes(cfg.DisallowedClients),
 		blockMode:  cfg.BlockingMode,

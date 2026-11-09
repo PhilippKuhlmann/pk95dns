@@ -50,7 +50,8 @@ type Deps struct {
 	// runtime and stored. Errors of mutate are returned unchanged. An *InvalidError (e.g.
 	// the upstreams can not be used) is answered with 422, other errors with 500.
 	UpdateSettings func(mutate func(s *config.Settings) error) error
-	// Reload re-applies local records and clients from the store to the DNS server.
+	// Reload re-applies zones, records (recompiled index) and clients from the store to the
+	// DNS server.
 	Reload func() error
 	// Upstreams returns the health of the main upstreams (GET /api/status). Optional.
 	Upstreams func() []upstream.Health
@@ -93,6 +94,8 @@ type API struct {
 
 	namesMu sync.Mutex
 	names   map[int64]string // list id → name, nil = reload
+
+	recordsMu sync.Mutex // serializes zone and record writes (validation against the stored set)
 }
 
 // New builds the handler.
@@ -151,7 +154,17 @@ func (a *API) routes() {
 	m.HandleFunc("POST /api/rules/quick", a.handleRulesQuick)
 	m.HandleFunc("GET /api/check", a.handleCheck)
 
-	// Local records.
+	// DNS zones and records.
+	m.HandleFunc("GET /api/zones", a.handleZones)
+	m.HandleFunc("POST /api/zones", a.handleZoneCreate)
+	m.HandleFunc("PUT /api/zones/{id}", a.handleZoneUpdate)
+	m.HandleFunc("DELETE /api/zones/{id}", a.handleZoneDelete)
+	m.HandleFunc("GET /api/records", a.handleRecords)
+	m.HandleFunc("POST /api/records", a.handleRecordCreate)
+	m.HandleFunc("PUT /api/records/{id}", a.handleRecordUpdate)
+	m.HandleFunc("DELETE /api/records/{id}", a.handleRecordDelete)
+
+	// Deprecated view on A/AAAA/CNAME records (version 1.0 "rewrites").
 	m.HandleFunc("GET /api/rewrites", a.handleRewrites)
 	m.HandleFunc("POST /api/rewrites", a.handleRewriteCreate)
 	m.HandleFunc("PUT /api/rewrites/{id}", a.handleRewriteUpdate)

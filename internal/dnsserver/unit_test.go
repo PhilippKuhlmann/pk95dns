@@ -113,7 +113,7 @@ func TestFinishStripsDNSSECForNonDOClients(t *testing.T) {
 	}
 	resp.Ns = []dns.RR{mustRR("x.example. 60 IN NSEC z.example. A")}
 	resp.SetEdns0(1232, true)
-	finish(req, resp, false)
+	finish(req, resp, false, false)
 	if len(resp.Answer) != 1 || len(resp.Ns) != 0 || resp.IsEdns0() != nil || resp.AuthenticatedData {
 		t.Fatalf("not stripped: %v", resp)
 	}
@@ -127,7 +127,7 @@ func TestFinishStripsDNSSECForNonDOClients(t *testing.T) {
 		mustRR("a.example. 60 IN A 1.2.3.4"),
 		mustRR("a.example. 60 IN RRSIG A 8 2 60 20300101000000 20200101000000 1 example. AAAA"),
 	}
-	finish(req, resp, false)
+	finish(req, resp, false, false)
 	if len(resp.Answer) != 2 || !resp.AuthenticatedData || resp.IsEdns0() == nil || !resp.IsEdns0().Do() {
 		t.Fatalf("DO client: %v", resp)
 	}

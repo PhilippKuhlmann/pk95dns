@@ -23,6 +23,7 @@ import (
 	"pk95dns/internal/filter"
 	"pk95dns/internal/lists"
 	"pk95dns/internal/querylog"
+	"pk95dns/internal/records"
 	"pk95dns/internal/stats"
 	"pk95dns/internal/store"
 	"pk95dns/internal/upstream"
@@ -83,7 +84,8 @@ type app struct {
 	events  *eventSender // nil in standalone mode
 	started time.Time
 
-	mu       sync.Mutex // serializes runtime changes
+	mu       sync.Mutex     // serializes runtime changes
+	index    *records.Index // compiled zones and records (guarded by mu, rebuilt by reload)
 	settings atomic.Pointer[config.Settings]
 	router   atomic.Pointer[upstream.Router]
 	// routerCfg is the upstream config of the settings the current router stands for
@@ -198,6 +200,9 @@ func (a *app) init() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.routerCfg = rcfg
+	if err := a.compileRecordsLocked(); err != nil {
+		return err
+	}
 	return a.applyLocked(s, router)
 }
 
@@ -248,19 +253,24 @@ func (a *app) currentSettings() config.Settings {
 	return a.settings.Load().Clone()
 }
 
-// applyLocked hands settings, router, local records and clients to the DNS server.
+// compileRecordsLocked builds the records index from the zones and records in the store.
 // Callers hold a.mu.
-func (a *app) applyLocked(s config.Settings, router *upstream.Router) error {
-	rws, err := a.st.Rewrites()
+func (a *app) compileRecordsLocked() error {
+	zones, err := a.st.Zones()
 	if err != nil {
 		return err
 	}
-	entries := make([]filter.RewriteEntry, 0, len(rws))
-	for _, rw := range rws {
-		if rw.Enabled {
-			entries = append(entries, filter.RewriteEntry{Domain: rw.Domain, Answer: rw.Answer})
-		}
+	recs, err := a.st.Records(store.RecordFilter{})
+	if err != nil {
+		return err
 	}
+	a.index = records.Compile(zones, recs)
+	return nil
+}
+
+// applyLocked hands settings, router, the records index and clients to the DNS server.
+// Callers hold a.mu.
+func (a *app) applyLocked(s config.Settings, router *upstream.Router) error {
 	clients, err := a.st.Clients()
 	if err != nil {
 		return err
@@ -268,7 +278,7 @@ func (a *app) applyLocked(s config.Settings, router *upstream.Router) error {
 	a.dns.Apply(dnsserver.Runtime{
 		Settings: s,
 		Router:   router,
-		Rewrites: filter.NewRewrites(entries),
+		Records:  a.index,
 		Clients:  clients,
 	})
 	a.router.Store(router)
@@ -316,10 +326,14 @@ func (a *app) updateSettings(mutate func(s *config.Settings) error) error {
 	return err
 }
 
-// reload re-applies local records and clients (api.Deps.Reload).
+// reload recompiles zones and records and re-applies them and the clients
+// (api.Deps.Reload).
 func (a *app) reload() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := a.compileRecordsLocked(); err != nil {
+		return err
+	}
 	return a.applyLocked(a.currentSettings(), a.router.Load())
 }
 

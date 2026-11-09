@@ -1,6 +1,6 @@
 // Package dnsserver runs the DNS listeners (UDP and TCP) and the query pipeline of
-// docs/design.md → Query pipeline: access control, rate limit, clients, local records,
-// filtering, cache, upstreams, CNAME check, query log and statistics.
+// docs/design.md → Query pipeline: access control, rate limit, clients, own zones and
+// records, filtering, cache, upstreams, CNAME check, query log and statistics.
 package dnsserver
 
 import (
@@ -17,6 +17,7 @@ import (
 	"pk95dns/internal/config"
 	"pk95dns/internal/filter"
 	"pk95dns/internal/querylog"
+	"pk95dns/internal/records"
 	"pk95dns/internal/stats"
 	"pk95dns/internal/store"
 	"pk95dns/internal/upstream"
@@ -26,7 +27,7 @@ import (
 type Runtime struct {
 	Settings config.Settings
 	Router   *upstream.Router
-	Rewrites *filter.Rewrites // enabled local records
+	Records  *records.Index // compiled own zones and records (nil: none)
 	Clients  []store.Client
 }
 
@@ -128,17 +129,17 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	}
 	start := time.Now()
 	if len(req.Question) != 1 {
-		s.write(w, req, rcodeReply(req, dns.RcodeFormatError))
+		s.write(w, req, rcodeReply(req, dns.RcodeFormatError), false)
 		return
 	}
 	if req.Opcode != dns.OpcodeQuery {
-		s.write(w, req, rcodeReply(req, dns.RcodeNotImplemented))
+		s.write(w, req, rcodeReply(req, dns.RcodeNotImplemented), false)
 		return
 	}
 	if opt := req.IsEdns0(); opt != nil && opt.Version() != 0 {
 		// RFC 6891 6.1.3: only EDNS version 0 is implemented. finish adds an OPT (version
 		// 0) that carries the extended rcode.
-		s.write(w, req, rcodeReply(req, dns.RcodeBadVers))
+		s.write(w, req, rcodeReply(req, dns.RcodeBadVers), false)
 		return
 	}
 	// The cache generation is read before the state: an answer resolved through a router
@@ -149,7 +150,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	}
 	st := s.state.Load()
 	if st == nil {
-		s.write(w, req, rcodeReply(req, dns.RcodeServerFailure))
+		s.write(w, req, rcodeReply(req, dns.RcodeServerFailure), false)
 		return
 	}
 	client := addrOf(w.RemoteAddr())
@@ -162,13 +163,13 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 	answer := summarize(o.resp.Answer)
-	s.write(w, req, o.resp)
+	s.write(w, req, o.resp, o.authoritative)
 	s.log(st, req, client, &o, answer, start, now, true)
 }
 
-// write finalizes resp for req and sends it.
-func (s *Server) write(w dns.ResponseWriter, req, resp *dns.Msg) {
-	finish(req, resp, isTCP(w))
+// write finalizes resp for req (AA bit = aa) and sends it.
+func (s *Server) write(w dns.ResponseWriter, req, resp *dns.Msg, aa bool) {
+	finish(req, resp, isTCP(w), aa)
 	_ = w.WriteMsg(resp)
 }
 
@@ -243,7 +244,8 @@ func (s *Server) displayName(st *state, a netip.Addr) string {
 }
 
 // Check runs the pipeline for name/qtype/client up to the filtering decision without asking
-// an upstream (local records, filtering, SafeSearch; status "ok" when nothing matched).
+// an upstream (own zones and records, filtering, SafeSearch; status "ok" when nothing
+// matched).
 func (s *Server) Check(name string, qtype uint16, clientIP string) CheckResult {
 	n := filter.NormalizeName(strings.TrimSpace(name))
 	res := CheckResult{Name: n, Type: typeString(qtype), ClientIP: strings.TrimSpace(clientIP), Status: statusOK}
@@ -282,13 +284,28 @@ func (s *Server) ClientName(ip string) string {
 	return ""
 }
 
-// Hostname returns the cached reverse-DNS name of ip ("" when unknown) and starts a
-// background lookup through the router when it is not cached (cache 1 h, failures 10 min).
+// Records returns the records index in use (nil before Apply or without records).
+func (s *Server) Records() *records.Index {
+	if st := s.state.Load(); st != nil {
+		return st.index
+	}
+	return nil
+}
+
+// Hostname returns the reverse-DNS name of ip ("" when unknown). Own PTR records (explicit
+// or synthesized from A/AAAA with ptr) answer first; otherwise it returns the cached name and
+// starts a background lookup through the router when it is not cached (cache 1 h, failures
+// 10 min).
 func (s *Server) Hostname(ip string) string {
 	return s.hostname(s.state.Load(), parseClientIP(ip))
 }
 
 func (s *Server) hostname(st *state, a netip.Addr) string {
+	if st != nil && a.IsValid() {
+		if name, ok := localHostname(st.index, a); ok {
+			return name
+		}
+	}
 	var resolve func(ctx context.Context, req *dns.Msg) (*dns.Msg, error)
 	if st != nil && st.router != nil {
 		r := st.router
@@ -298,4 +315,26 @@ func (s *Server) hostname(st *state, a netip.Addr) string {
 		}
 	}
 	return s.hosts.lookup(a, s.now(), resolve)
+}
+
+// localHostname answers the reverse lookup of a from the records index. ok is true when the
+// index owns the reverse name (a PTR record, or an authoritative zone without one: then
+// name is "" and no upstream is asked).
+func localHostname(ix *records.Index, a netip.Addr) (name string, ok bool) {
+	arpa, err := dns.ReverseAddr(a.String())
+	if err != nil {
+		return "", false
+	}
+	res := ix.Resolve(arpa, dns.TypePTR)
+	if !res.Found {
+		return "", false
+	}
+	for _, rr := range res.Answer {
+		if ptr, isPTR := rr.(*dns.PTR); isPTR {
+			if n := strings.TrimSuffix(strings.ToLower(ptr.Ptr), "."); n != "" {
+				return n, true
+			}
+		}
+	}
+	return "", true
 }
