@@ -58,10 +58,8 @@ For every query (client IP `c`, name `n` lowercased without trailing dot, type `
 3. **ANY** with `refuse_any` → NOTIMP (status `refused`, reason `any`).
 4. **Client**: most specific configured client for `c` → effective filtering on/off, SafeSearch, blocked
    services (global unless the client overrides).
-5. **Local records** (rewrites, always active, also when protection is off): exact match beats `*.` wildcard.
-   IP answers only for the matching family (A → IPv4 records, AAAA → IPv6 records; the other family gets an
-   empty NOERROR if the name has records but none of that family). Host name answers become a CNAME plus the
-   resolved target (through the pipeline from step 5, max depth 5). Status `rewrite`.
+5. **Own zones and records** (always active, also when protection is off, never filtered): see
+   "Local zones and records" below. Status `rewrite`, reason `zone` or `record`.
 6. **Filtering** (when protection is on – global and not paused – and the client's filtering is on):
    `filter.Engine.Check` (order below). Block → blocked answer per `blocking_mode` (TTL `blocked_ttl`);
    hosts rule with an address → that address (status `rewrite`); SafeSearch → CNAME + resolved target
@@ -80,6 +78,30 @@ address for its family, other types/families empty NOERROR.
 
 Responses keep the client's EDNS0 UDP size; answers bigger than the UDP size are truncated (TC bit) so the
 client retries over TCP. The upstream request uses a fresh ID and a copy of the question; DO bit when `dnssec`.
+
+## Local zones and records
+
+Package `internal/records` compiles enabled zones and records into an immutable index (swapped atomically on
+every change) and answers lookups; the store keeps `zones` and `records` (docs/api.md → DNS zones and records).
+
+**Zone answers** (longest enabled zone containing the query name; AA bit set, never forwarded):
+- name with records: matching type → those records; CNAME at the name → CNAME, then the target is resolved
+  (local index first, else cache/upstream, no filtering, max depth 5); other type → NODATA (NOERROR, SOA in authority).
+- apex: SOA and NS are synthesized (SOA `<primary_ns> hostmaster.<zone> <serial> 3600 600 604800 <ttl>`).
+- name without records but with records below it (empty non-terminal) → NODATA.
+- otherwise wildcard per RFC 4592: the closest encloser's `*.` child, if any, answers with the query name as owner
+  (a wildcard never matches names that exist, and does not cover the encloser itself).
+- otherwise NXDOMAIN with the SOA in authority (negative TTL = zone `ttl`).
+
+**Single records** (no zone covers the name): exact name beats the most specific `*.` wildcard; matching type →
+answer; CNAME → chase like above; records but none of this type → empty NOERROR (no SOA); no records → continue
+with filtering/cache/upstream (as before).
+
+**Additional section**: for MX and SRV answers the A/AAAA records of the targets from the index (zones and single
+records). **Reverse lookups**: explicit PTR records first, then PTRs synthesized from A/AAAA records with
+`ptr: true` (all names of that address), then the normal private-PTR routing. TXT values over 255 bytes are split
+into several strings. TTLs come from the records; local answers are never put into the cache.
+DNSSEC: zones are not signed; DS/DNSKEY/RRSIG queries inside a zone get NODATA. No zone transfers: AXFR/IXFR → REFUSED.
 
 ## Filtering (filter package)
 
@@ -229,7 +251,8 @@ The app sends `upstream.down` when every main upstream failed for 60 s and `upst
 ## Storage
 
 SQLite in WAL mode, one connection pool, `busy_timeout`. Tables (see `internal/store`): `settings` (key,
-JSON value), `lists`, `custom_rules` (single row), `rewrites`, `clients`, `users`, `sessions` (token hash),
+JSON value), `lists`, `custom_rules` (single row), `zones`, `records` (schema v2 migrated the v1 `rewrites`
+with the same ids), `clients`, `users`, `sessions` (token hash),
 `queries` (query log, indexes on `ts`, `name`, `client_ip`), `stats_hours` (hour, totals),
 `stats_top` (hour, kind, key, count – top 100 per kind and hour). List contents live in
 `<data>/lists/<id>.txt` so a restart does not need the network.
@@ -252,7 +275,7 @@ again), `dns.listen_failed` (critical), `dns.listen_ok` (info). Buffered and ret
     { "key": "log", "label": "Abfragen", "icon": "list" },
     { "key": "lists", "label": "Blocklisten", "icon": "shield" },
     { "key": "rules", "label": "Eigene Regeln", "icon": "pencil" },
-    { "key": "rewrites", "label": "Lokale Einträge", "icon": "link" },
+    { "key": "records", "label": "DNS-Einträge", "icon": "link" },
     { "key": "services", "label": "Dienste", "icon": "lock" },
     { "key": "clients", "label": "Clients", "icon": "user" },
     { "key": "settings", "label": "Einstellungen", "icon": "cog" }
