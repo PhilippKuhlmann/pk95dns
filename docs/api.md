@@ -54,7 +54,7 @@ the first password change.
   "started_at": 1762700000000,
   "dns": { "listen": "0.0.0.0:53", "udp": true, "tcp": true, "error": "" },
   "protection": { "enabled": true, "paused_until": 0 },
-  "rules": { "lists": 3, "list_rules": 152340, "custom_rules": 12, "rewrites": 4, "services": 2 },
+  "rules": { "lists": 3, "list_rules": 152340, "custom_rules": 12, "rewrites": 4, "zones": 1, "records": 14, "services": 2 },
   "cache": { "enabled": true, "entries": 1840, "hits": 9120, "misses": 4410 },
   "upstreams": [
     { "address": "https://dns.quad9.net/dns-query", "ok": true, "avg_ms": 18.4, "queries": 3010, "failures": 2, "last_error": "" }
@@ -62,6 +62,7 @@ the first password change.
 }
 ```
 
+`rules.zones`/`rules.records`: enabled zones and records; `rules.rewrites` (deprecated) = enabled A/AAAA/CNAME records.
 `dns.error` is a German message when binding failed (e.g. "Port 53 ist belegt: …"); the server retries every 30 s.
 `protection.paused_until` > 0: blocking is paused until then. `enabled: false` with `paused_until: 0`: off until switched on.
 
@@ -129,11 +130,11 @@ Status vocabulary (also used by `/api/check`):
 | `blocked` | block rule (custom rules or a block list) |
 | `blocked_service` | a blocked service (`service` = service id) |
 | `safesearch` | rewritten to the SafeSearch host |
-| `rewrite` | local DNS record or hosts rule with an address (`rule`) |
+| `rewrite` | own DNS record or zone answer (reason `record`/`zone`, also NXDOMAIN/NODATA of a zone), or a hosts rule with an address (`rule`) |
 | `refused` | client not allowed, ANY refused, or rate limit |
 | `error` | all upstreams failed (SERVFAIL) |
 
-`reason`: `list`, `custom`, `service`, `safesearch`, `rewrite`, `access`, `any`, `ratelimit`, `upstream`, `""`.
+`reason`: `list`, `custom`, `service`, `safesearch`, `record` (single record), `zone` (authoritative zone, also its NXDOMAIN/NODATA), `access`, `any`, `ratelimit`, `upstream`, `""`.
 `answer`: short text, comma separated (`"93.184.216.34, 2606:2800::1"`, `"CNAME forcesafesearch.google.com"`, `""`).
 `next_before`: id for the next page, `0` when there is none.
 
@@ -194,15 +195,86 @@ Runs the filter pipeline without asking an upstream. `type` default `A`, `client
 
 `status` is `ok` when nothing matched. `422 fields.name` for an invalid domain.
 
-## Local DNS records (rewrites)
+## DNS zones and records
+
+PK95 DNS answers its own records before filtering, cache and upstreams – also while protection is paused,
+and never blocked by lists. There are two kinds (docs/design.md → Local zones and records):
+
+- **Zones** (authoritative): for names inside an enabled zone PK95 DNS alone answers (AA bit, SOA/NS, NXDOMAIN
+  or NODATA with SOA); nothing of the zone goes to an upstream.
+- **Single records** (no zone): answered before the upstream; other names and types still go upstream.
+
+### Zones
+
+```json
+{ "id": 1, "name": "home.lan", "ttl": 300, "primary_ns": "ns.home.lan", "enabled": true,
+  "serial": 2026110902, "record_count": 12, "created_at": 1762690000000 }
+```
+
+| Route | Body | Answer |
+|---|---|---|
+| `GET /api/zones` | – | `200 [zone…]` ordered by name |
+| `POST /api/zones` | `{"name","ttl","primary_ns","enabled"}` | `201 zone`. Existing single records inside the zone move into it. |
+| `PUT /api/zones/{id}` | same | `200 zone` (renaming moves nothing: `422 fields.name` while the zone has records) |
+| `DELETE /api/zones/{id}` | – | `204`, removes the zone **and its records** |
+
+- `name`: domain without wildcard, lowercase (normalised), also reverse zones like `168.192.in-addr.arpa`; unique.
+  Nested zones are allowed (the longest matching zone owns a name).
+- `ttl`: 0–604800, default 300 – TTL of SOA/NS and the negative-answer TTL (SOA minimum).
+- `primary_ns`: host name for SOA MNAME and the NS record, default `ns.<zone>`.
+- `serial`, `record_count` are read-only. The serial (YYYYMMDDnn) increases with every change of the zone or its records.
+- SOA: `<primary_ns> hostmaster.<zone> <serial> 3600 600 604800 <ttl>`; NS at the apex: `<primary_ns>`.
+
+### Records
+
+```json
+{ "id": 7, "zone_id": 1, "name": "mail.home.lan", "type": "MX", "value": "mx.home.lan",
+  "ttl": 300, "priority": 10, "weight": 0, "port": 0, "ptr": false, "enabled": true,
+  "managed_by": "", "created_at": 1762690000000 }
+```
+
+| Route | Body | Answer |
+|---|---|---|
+| `GET /api/records?zone_id=&type=&name=&q=` | – | `200 [record…]` ordered by name, type, priority, value. `zone_id=0` = single records only; `name` exact; `q` substring of name or value |
+| `POST /api/records` | record without `id`, `zone_id`, `created_at` | `201 record` |
+| `PUT /api/records/{id}` | same | `200 record` |
+| `DELETE /api/records/{id}` | – | `204` |
+
+- `zone_id` is derived from `name` (longest matching zone, 0 = single record) and ignored in request bodies.
+- `name`: full host name (lowercase, no trailing dot) or `*.<name>` wildcard (types A, AAAA, CNAME, TXT, MX).
+  Inside a zone the apex is the zone name itself.
+- `type` and `value`:
+
+| type | value | extra fields |
+|---|---|---|
+| `A` | IPv4 address | `ptr` |
+| `AAAA` | IPv6 address | `ptr` |
+| `CNAME` | host name | – |
+| `MX` | host name of the mail server | `priority` 0–65535 |
+| `TXT` | text, 1–4000 printable chars (split into 255-byte strings in the answer) | – |
+| `SRV` | target host name; `name` like `_ldap._tcp.home.lan` | `priority`, `weight`, `port` 0–65535 (`port` ≥ 1) |
+| `PTR` | host name; `name` must be a reverse name (`…in-addr.arpa` / `…ip6.arpa`) | – |
+
+- `ttl` 0–604800, default 300. Fields that do not belong to the type are stored as 0/false.
+- `ptr: true` on A/AAAA: PK95 DNS also answers the reverse lookup of the address with the record's name (an
+  explicit PTR record for the same reverse name wins).
+- `managed_by`: `""` or `"core"` (records PK95 Core created for deployed apps; shown as such in the UIs).
+- Validation (`422 fields.<key>`, German): CNAME not next to any other record of the same name and not at a zone
+  apex; no other type next to an existing CNAME; host name targets (CNAME/MX/SRV/PTR) must be host names, not IP
+  addresses; no exact duplicate (same name, type, value, priority, weight, port); at most 50 000 records.
+
+### Compatibility: `/api/rewrites` (deprecated)
+
+The local records of version 1.0 became records with the **same ids** (IP → A/AAAA, host name → CNAME, TTL 60).
+`/api/rewrites` keeps working as a view on all A, AAAA and CNAME records:
 
 ```json
 { "id": 3, "domain": "nas.home.lan", "answer": "192.168.1.10", "enabled": true, "created_at": 1762690000000 }
 ```
 
-`GET /api/rewrites` → `200 [rewrite…]` (ordered by domain); `POST /api/rewrites` → `201`; `PUT /api/rewrites/{id}` → `200`; `DELETE` → `204`.
-`domain`: host name, or `*.example.lan` for all subdomains (not the domain itself). `answer`: IPv4, IPv6 or a host
-name (answered as CNAME, the target is resolved further). Exact entries win over wildcards.
+`GET /api/rewrites` → `200 [rewrite…]` (ordered by domain); `POST` → `201` (creates an A/AAAA/CNAME record with
+TTL 60, type from `answer`); `PUT /api/rewrites/{id}` → `200` (name, value, enabled; type follows the answer);
+`DELETE` → `204`. Ids of records of other types → `404`. Validation errors keep the field names `domain`/`answer`.
 
 ## Blocked services
 
