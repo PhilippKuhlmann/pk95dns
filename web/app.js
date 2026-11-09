@@ -1793,14 +1793,31 @@ function reverseName(ip) {
   return groups.map((g) => g.padStart(4, "0").toLowerCase()).join("").split("").reverse().join(".") + ".ip6.arpa";
 }
 
-function recordValue(r) {
-  if (r.type === "MX") return [h("span", { class: "mono" }, r.value), h("span", { class: "cell-sub" }, `Priorität ${r.priority}`)];
-  if (r.type === "SRV") {
-    return [h("span", { class: "mono" }, `${r.value}:${r.port}`),
-      h("span", { class: "cell-sub" }, `Priorität ${r.priority} · Gewicht ${r.weight} · Port ${r.port}`)];
+// breakable renders a host name or address so the browser may only wrap it after a dot
+// (or a colon in IPv6), never in the middle of a label.
+function breakable(text) {
+  const out = [];
+  for (const part of String(text).split(/(?<=[.:])/)) {
+    if (out.length) out.push(h("wbr"));
+    out.push(part);
   }
-  if (r.type === "TXT" && r.value.length > 160) return h("span", { class: "mono txt-value", title: r.value }, r.value.slice(0, 160) + " …");
-  return h("span", { class: r.type === "TXT" ? "mono txt-value" : "mono" }, r.value);
+  return out;
+}
+
+// recordValue: the value on its own line (host names wrap only at dots), below it the
+// type's extra fields and the TTL as small chips.
+function recordValue(r) {
+  const chips = [];
+  if (r.type === "MX" || r.type === "SRV") chips.push(["Priorität", r.priority]);
+  if (r.type === "SRV") chips.push(["Gewicht", r.weight], ["Port", r.port]);
+  chips.push(["TTL", `${nf.format(r.ttl)} s`]);
+  const meta = h("span", { class: "rec-meta" }, chips.map(([k, v]) => h("span", { class: "meta-chip" }, `${k} ${v}`)));
+  let value;
+  if (r.type === "SRV") value = h("span", { class: "mono host" }, breakable(r.value), h("span", { class: "port" }, `:${r.port}`));
+  else if (r.type === "TXT" && r.value.length > 160) value = h("span", { class: "mono txt-value", title: r.value }, r.value.slice(0, 160) + " …");
+  else if (r.type === "TXT") value = h("span", { class: "mono txt-value" }, r.value);
+  else value = h("span", { class: "mono host" }, breakable(r.value));
+  return [value, meta];
 }
 
 // Short text of a record for confirmations.
@@ -1841,7 +1858,7 @@ VIEWS.records = function viewRecords(root, params, ctx) {
   const table = h("table", { class: "resp-table records-table" },
     h("thead", {}, h("tr", {},
       h("th", { scope: "col" }, "Aktiv"), h("th", { scope: "col" }, "Name"), h("th", { scope: "col" }, "Typ"),
-      h("th", { scope: "col" }, "Wert"), h("th", { scope: "col", class: "num" }, "TTL"), h("th", { scope: "col" }, "Status"),
+      h("th", { scope: "col" }, "Wert"), h("th", { scope: "col" }, "Status"),
       h("th", { scope: "col" }, h("span", { class: "sr-only" }, "Aktionen")))),
     tbody);
   const emptyBox = h("div", { class: "empty-state", hidden: true });
@@ -2029,11 +2046,10 @@ VIEWS.records = function viewRecords(root, params, ctx) {
         : h("span", { class: "badge good" }, "Aktiv");
     return h("tr", { class: r.enabled && !zoneOff ? "" : "off" },
       h("td", { style: "width:60px" }, sw.el),
-      h("td", { class: "wrap name-cell", "data-label": "Name" }, h("strong", {}, r.name),
+      h("td", { class: "name-cell", "data-label": "Name" }, h("strong", { class: "host" }, breakable(r.name)),
         h("span", { class: "cell-sub" }, zone ? "Zone " + zone.name : "Einzeleintrag")),
       h("td", { "data-label": "Typ" }, h("span", { class: "rtype" }, r.type)),
-      h("td", { class: "wrap value-cell", "data-label": "Wert" }, recordValue(r)),
-      h("td", { class: "num", "data-label": "TTL" }, `${nf.format(r.ttl)} s`),
+      h("td", { class: "value-cell", "data-label": "Wert" }, recordValue(r)),
       h("td", { "data-label": "Status" }, h("span", { class: "badges" },
         stateBadge,
         r.ptr && (r.type === "A" || r.type === "AAAA") ? h("span", { class: "badge info", title: "Rückwärtsauflösung (PTR) automatisch" }, "+ PTR") : null,

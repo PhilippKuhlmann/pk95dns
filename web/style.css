@@ -617,8 +617,18 @@ tr.off td { color: var(--muted); }
 }
 .records-table td { vertical-align: top; }
 .records-table td:first-child { vertical-align: middle; }
-.records-table .value-cell { max-width: 420px; }
-.records-table .name-cell { min-width: 190px; }
+/* Columns size by content: host names wrap only at dots (<wbr>), never inside a label,
+   so the value column keeps a readable width; on narrow screens the table scrolls
+   (above 720px) or turns into cards (resp-table). */
+.records-table { min-width: 640px; }
+.records-table th, .records-table td { padding-left: 10px; padding-right: 10px; }
+.records-table .name-cell { min-width: 140px; width: 28%; }
+.records-table .value-cell { min-width: 190px; width: 38%; }
+.records-table .host { overflow-wrap: normal; word-break: normal; }
+.records-table td.num, .records-table .rtype { white-space: nowrap; }
+.records-table .port { color: var(--muted); }
+.rec-meta { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.meta-chip { white-space: nowrap; font-size: 11.5px; color: var(--ink-2); background: var(--surface-2); border-radius: 6px; padding: 1px 7px; }
 .txt-value { white-space: pre-wrap; overflow-wrap: anywhere; }
 .badges { display: inline-flex; flex-wrap: wrap; gap: 4px; }
 .warn-text { color: var(--warn-ink); }
@@ -824,6 +834,8 @@ fieldset input[type="text"], fieldset input[type="number"], fieldset textarea, f
   .card .table-wrap { margin: 0 -20px; }
   .resp-table thead { display: none; }
   .resp-table, .resp-table tbody, .resp-table tr, .resp-table td { display: block; width: 100%; }
+  .records-table, .records-table .name-cell, .records-table .value-cell { min-width: 0; }
+  .records-table .value-cell { width: 100%; }
   .resp-table tr { padding: 12px 20px; border-bottom: 1px solid var(--grid); }
   .resp-table tr:last-child { border-bottom: 0; }
   .card .resp-table td, .resp-table td { border: 0; padding: 2px 0; text-align: left; }
