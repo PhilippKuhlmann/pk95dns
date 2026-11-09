@@ -30,7 +30,7 @@ main.go                 env/flags → app.Run
 internal/config         Settings struct, Defaults(), Validate(), Merge (partial PUT)
 internal/filter         rule parser, compiled RuleSet, Engine (atomic snapshots), services catalog,
                         SafeSearch table, Rewrites table (local records)
-internal/upstream       address parsing, plain/DoT/DoH upstreams, bootstrap, Router (modes,
+internal/upstream       address parsing, plain/DoT/DoH/DoH3/DoQ upstreams, bootstrap, Router (modes,
                         conditional forwarding, private PTR, fallback, health)
 internal/cache          DNS answer cache (LRU, TTL, min/max TTL)
 internal/store          SQLite (modernc.org/sqlite, WAL): settings, lists, custom rules, rewrites,
@@ -38,14 +38,14 @@ internal/store          SQLite (modernc.org/sqlite, WAL): settings, lists, custo
 internal/querylog       buffered writer: batches entries into the store, pruning
 internal/stats          in-memory hourly aggregation, flush to the store, summaries for /api/stats
 internal/dnsserver      UDP/TCP listeners and the query pipeline, client matching, rate limit, /api/check
-internal/lists          list download/update manager (ETag, size limit, last good copy), catalog
+internal/lists          list download/update manager (ETag, size limit, last good copy, no https→http redirect), catalog
 internal/api            HTTP API (docs/api.md), auth (sessions, login limiter), Core mode, web embed
 internal/app            wiring: builds everything from the store, reloads on changes, events to Core
 web/                    standalone SPA (vanilla JS, embedded): index.html, app.js, style.css
 ```
 
-Dependencies: `github.com/miekg/dns`, `modernc.org/sqlite`, `golang.org/x/crypto/bcrypt`. No others
-without need. `go test ./...` must pass with `-race`; `gofmt` clean.
+Dependencies: `github.com/miekg/dns`, `modernc.org/sqlite`, `golang.org/x/crypto/bcrypt`,
+`github.com/quic-go/quic-go` (DNS-over-QUIC and DoH over HTTP/3). No others without need. `go test ./...` must pass with `-race`; `gofmt` clean.
 
 ## Query pipeline (dnsserver)
 
@@ -95,14 +95,14 @@ client retries over TCP. The upstream request uses a fresh ID and a copy of the 
 | `/regex/` | block when the regular expression (RE2) matches the name; `@@/regex/` allows |
 | `||ads*.example.org^` | `*` wildcard inside a pattern (compiled to a regex) |
 | `0.0.0.0 a.example b.example`, `127.0.0.1 …`, `:: …`, `::1 …` | hosts syntax: block exactly these names |
-| `192.168.1.5 nas.lan` | hosts syntax with another address: answer with that address (rewrite) |
+| `192.168.1.5 nas.lan` | hosts syntax with another address: answer with that address (rewrite); in lists downloaded over plain `http://` it blocks the name instead (their content is not integrity protected) |
 | `…$important` | beats allow rules |
 | `…$dnstype=AAAA|HTTPS` | only for these query types (`~TYPE` excludes) |
 
 Other `$` options (`$client`, `$dnsrewrite`, `$denyallow`, `$badfilter`, `$ctag`, …) and cosmetic rules
 (`##`, `#@#`, `#$#`) make the line invalid (ignored, counted, reported for custom rules). `localhost`,
 `localhost.localdomain`, `local`, `broadcasthost`, `ip6-*` entries in hosts files are skipped silently.
-Domains are lowercased, IDNs must be punycode. Max 1000 regex rules per source (rest invalid).
+Domains are lowercased, IDNs must be punycode. Max 1000 rules that compile to a regex (`/regex/` and `*` wildcards inside a pattern) per source and 20000 across all sources (rest invalid).
 
 ### Decision order (`Engine.Check`)
 
@@ -137,17 +137,90 @@ Network, Xbox Live, Amazon, eBay, Temu, AliExpress, ChatGPT, Tinder, 9GAG, VK.
 
 ## Upstreams (upstream package)
 
-Address forms: see `docs/api.md` → Settings. Plain DNS uses UDP with TCP retry on truncation; `tcp://`
-only TCP; DoT (`tls://host[:853]`, certificate checked against the host name); DoH (`https://…`, RFC 8484
-POST `application/dns-message`, HTTP/2 when offered). Host names of DoT/DoH upstreams are resolved through
-the bootstrap servers (system resolver when `bootstrap` is empty), cached for the answer TTL (min 60 s).
+Address forms: see `docs/api.md` → Settings. Transports (`Spec.Protocol()` label in brackets):
+
+| Address | Transport |
+|---|---|
+| `9.9.9.9[:53]`, `udp://…` | plain DNS over UDP, TCP retry on truncation (`DNS`) |
+| `tcp://…` | plain DNS over TCP only (`DNS/TCP`) |
+| `tls://host[:853]` | DNS-over-TLS, RFC 7858, pool of up to 4 idle connections, one query per connection at a time (`DoT`) |
+| `https://host[:443][/path]` | DNS-over-HTTPS, RFC 8484 POST over HTTP/2 (HTTP/1.1 if the server offers nothing else); never upgraded to HTTP/3 by itself (`DoH`) |
+| `h3://host[:443][/path]` | DNS-over-HTTPS over HTTP/3 (QUIC), same request and checks as DoH (`DoH3`) |
+| `quic://host[:853]` | DNS-over-QUIC, RFC 9250 (`DoQ`) |
+
+Plain addresses need an IP; encrypted ones take an IP or a host name (path default `/dns-query`).
+
+**DNS-over-QUIC** (`quic-go`): ALPN `doq`, TLS 1.3. One long-lived QUIC connection per upstream, shared
+by all queries; each query on its own bidirectional stream: 2-byte length prefix + message with ID 0 (the
+caller's ID is restored in the answer), then STREAM FIN; the answer is read up to the server's FIN, at
+most 2 + 65535 bytes, and must be exactly one length-prefixed message with ID 0 – otherwise the connection is
+closed with `DOQ_PROTOCOL_ERROR`. Cancelled/timed-out queries reset their stream with
+`DOQ_REQUEST_CANCELLED`. The connection is dialed on demand, one dial at a time, shared by every query that
+waits for it and detached from their contexts (bounded by the upstream timeout): a query that is cancelled –
+the loser in `parallel` mode, a client that gave up – only stops waiting, the handshake completes and the
+connection serves the next query. It closes after 30 s idle (no keep-alives) and is dialed again; when a
+query fails because the shared connection was closed in the meantime (idle timeout, `CONNECTION_CLOSE` with
+any DoQ error code, stateless reset) it is sent once more on a fresh connection. A server that lost its
+state silently (restart without stateless reset, anycast change) leaves the connection open locally: when a
+query times out after at least half the upstream timeout and nothing at all arrived on its connection since
+it started, the connection is detached – new queries dial a fresh one – and closed once its last query in
+flight is done (in-flight queries are counted per connection). `Close` closes the connection with
+`DOQ_NO_ERROR` after the last query in flight. Never 0-RTT: 0-RTT data can be replayed by an attacker.
+
+**DoH3** uses `http3.Transport` (one shared connection per host, dialed detached from the request). The
+transport keeps that connection when a request only times out, so the upstream tracks the connections it
+dialed: on a timeout (same rule as DoQ: at least half the upstream timeout, no response header on that
+connection since the request started) the connection is closed with `H3_NO_ERROR`, and the transport dials
+a fresh one for the next request. Requests still waiting on it fail, but they have received nothing either.
+
+**Hardening** of the encrypted transports (there is deliberately no option to weaken any of it):
+
+- Certificates are always verified against the system roots and the configured host (IP hosts must be in
+  the IP SANs). No "skip verification" option. TLS 1.2 minimum for DoT/DoH, TLS 1.3 for DoQ/DoH3 (QUIC).
+- DoH/DoH3: no redirects (a redirect could downgrade or leak the query to another host – it is an error),
+  no cookie jar, no HTTP proxy (`Proxy: nil`: a proxy from the environment would see every query target and
+  DNS must not depend on it), no compression, response header limit 64 KiB, idle pool of 4 connections
+  (90 s), TLS handshake and response header timeouts equal to the upstream timeout. Request: POST
+  `application/dns-message` with `Accept: application/dns-message`, ID 0. Response: status 200,
+  `Content-Type: application/dns-message` (parameters allowed), body ≤ 65535 bytes, otherwise an error.
+- Every transport (plain UDP/TCP included) checks that the answer has the QR bit and answers the question
+  of the query (name case-insensitive, type, class); mismatches are errors. Plain UDP/TCP and DoT also
+  require the query ID (UDP answers with another ID are ignored, as miekg/dns does).
+- **Padding** (RFC 7830, block-length strategy of RFC 8467): queries over DoT, DoH, DoH3 and DoQ are padded
+  to a multiple of 128 octets. This is done on a copy (`Exchange` never modifies the caller's message): an
+  OPT record (UDP size 1232) is added when the query has none – and removed from the answer again –,
+  existing padding options are replaced, padding in the answer is stripped. Plain DNS is never padded.
+
+**Bootstrap**: host names of encrypted upstreams are resolved through the `bootstrap` servers (plain DNS,
+system resolver when `bootstrap` is empty – never this server itself), cached for the answer TTL, at least
+60 s and at most 1 h (system resolver: 5 min). Bootstrap answers are not trusted for integrity: a forged
+address only makes the connection fail the certificate check, so the bootstrap servers can see which
+upstream is used but cannot redirect queries. To keep a forged answer from causing a long outage, the TTL
+is capped and the cached addresses of a host are dropped when connecting to every one of them failed (TCP
+for DoT/DoH, QUIC handshake for DoQ/DoH3; not when the dial was cancelled), so the next query resolves the
+name again.
+The defaults avoid bootstrap for the fallback by using IP endpoints whose certificates carry the IP
+(`https://9.9.9.9/dns-query`, `https://1.1.1.1/dns-query`).
+
+**`encrypted_only`** (default `true`): `upstreams` and `fallback` must be `tls://`, `https://`, `h3://` or
+`quic://` (checked by `config.Validate` with `upstream.Encrypted`). `conditional` and `private_upstreams`
+are meant for the LAN (router, Fritz!Box): they may stay plain, but only to a private IP
+(`upstream.LANOnly`: 10/8, 172.16/12, 192.168/16, 100.64/10, 127/8, 169.254/16, fc00::/7, fe80::/10, ::1) –
+otherwise e.g. a conditional rule for `com` to `8.8.8.8` would send queries unencrypted over the internet.
+Public servers there must be encrypted as well. The router itself does not enforce it – the settings
+validation does.
 
 Modes: `load_balance` picks an upstream weighted by inverse average RTT (unknown/failed ones get a chance
 too), `parallel` asks all and takes the first good answer, `sequential` tries in order. An answer is "good"
-unless it is SERVFAIL/REFUSED or an error. When all fail, `fallback` upstreams are tried in order.
+unless it is SERVFAIL/REFUSED or an error. When all fail, `fallback` upstreams are tried in order. A query
+has a budget of 2× `upstream_timeout`; when fallbacks exist, the main upstreams get the budget minus one
+timeout so the fallback is always asked. In `load_balance`/`sequential` mode each try gets at most a fair
+share of the time left (remaining / upstreams left), and connecting to a host with several addresses gives
+each address such a share too, so one upstream or address that silently drops packets cannot use up the
+whole budget.
 
 Routing: longest matching `conditional` domain wins (its upstream only, no fallback). Reverse lookups for
-private ranges with `private_ptr` → `private_upstreams` (or NXDOMAIN when empty). Everything else → main
+private ranges (any name below their reverse zone, e.g. DNS-SD browse names) with `private_ptr` → `private_upstreams` (or NXDOMAIN when empty). Everything else → main
 upstreams.
 
 Health per upstream: queries, failures, average RTT (EWMA), last error, `ok` = last answer good.

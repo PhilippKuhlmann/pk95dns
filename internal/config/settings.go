@@ -36,6 +36,9 @@ type Settings struct {
 	Conditional       []Conditional `json:"conditional"`
 	PrivatePTR        bool          `json:"private_ptr"`
 	PrivateUpstreams  []string      `json:"private_upstreams"`
+	// EncryptedOnly: upstreams and fallback must be DoT, DoH, DoH3 or DoQ; conditional and
+	// private_upstreams may stay plain only to a private (LAN) IP.
+	EncryptedOnly bool `json:"encrypted_only"`
 
 	CacheEnabled bool   `json:"cache_enabled"`
 	CacheSize    int    `json:"cache_size"`
@@ -93,9 +96,14 @@ var PrivateNets = []string{
 // Defaults are the settings of a fresh installation.
 func Defaults() Settings {
 	return Settings{
-		Upstreams:         []string{"https://dns.quad9.net/dns-query", "https://cloudflare-dns.com/dns-query"},
-		Fallback:          []string{"9.9.9.9", "1.1.1.1"},
+		Upstreams: []string{"https://dns.quad9.net/dns-query", "https://cloudflare-dns.com/dns-query"},
+		// Fallback by IP address: works without bootstrap; both certificates carry the IP
+		// in their SANs (checked 2026-11-09), so they are verified like the host names.
+		Fallback: []string{"https://9.9.9.9/dns-query", "https://1.1.1.1/dns-query"},
+		// Bootstrap only resolves the host names of encrypted upstreams. A forged answer can
+		// only redirect the connection, which then fails the certificate check.
 		Bootstrap:         []string{"9.9.9.9", "1.1.1.1"},
+		EncryptedOnly:     true,
 		UpstreamMode:      ModeLoadBalance,
 		UpstreamTimeoutMS: 4000,
 		Conditional:       []Conditional{},
@@ -128,6 +136,15 @@ func Defaults() Settings {
 // fields can not be changed this way.
 func Merge(base Settings, patch []byte) (Settings, error) {
 	out := base.Clone()
+	// A key that is present replaces the whole value. encoding/json decodes array elements
+	// into the existing struct elements of a slice, so keys missing in a new conditional
+	// entry would keep the values of the old entry at that index: start from an empty slice.
+	var keys map[string]json.RawMessage
+	if json.Unmarshal(patch, &keys) == nil {
+		if _, ok := keys["conditional"]; ok {
+			out.Conditional = nil
+		}
+	}
 	dec := json.NewDecoder(bytes.NewReader(patch))
 	if err := dec.Decode(&out); err != nil {
 		return base, errors.New("Ungültiges JSON: " + err.Error())

@@ -31,7 +31,7 @@ the first password change.
 
 | Route | Body | Answer |
 |---|---|---|
-| `POST /api/login` | `{"username","password"}` | `200 {"username"}` + cookie; `401` wrong; `429` after 5 failures per IP in 15 min |
+| `POST /api/login` | `{"username","password"}` | `200 {"username"}` + cookie; `401` wrong; `429` after 5 failures per client in 15 min (client = IPv4 address or IPv6 /64; attempts in flight count, so parallel requests cannot exceed the limit) |
 | `POST /api/logout` | – | `204` |
 | `GET /api/me` | – | `200 {"username","core_mode":false}` or `401` |
 | `POST /api/password` | `{"current","new"}` | `204`; `422` fields `current` (wrong) / `new` (min. 12 chars) |
@@ -160,7 +160,12 @@ List object:
 
 Validation: `name` 1–80 chars; `url` `http(s)://…` max 2000 chars and unique; `kind` `block`|`allow`.
 Downloads: max 64 MiB, timeout 60 s, conditional GET (`ETag`/`Last-Modified`); the last good copy stays
-in use when a download fails (`last_error`).
+in use when a download fails (`last_error`). At most 5 redirects, and never from `https://` to `http://`
+(`last_error` „Download fehlgeschlagen: … Weiterleitung von https auf http abgelehnt“). `http://` lists are
+still accepted but are not integrity protected: their hosts lines with a non-null address
+(`192.168.1.5 nas.lan`) block the name instead of rewriting it; only `https://` lists can rewrite. UIs
+should recommend `https://`. Changing the `url` while a download runs downloads the new address
+afterwards; the result of the old one is dropped.
 
 ## Custom rules
 
@@ -238,8 +243,9 @@ object (`422` on invalid values, nothing is saved then). `blocked_services` and 
 ```json
 {
   "upstreams": ["https://dns.quad9.net/dns-query", "https://cloudflare-dns.com/dns-query"],
-  "fallback": ["9.9.9.9", "1.1.1.1"],
+  "fallback": ["https://9.9.9.9/dns-query", "https://1.1.1.1/dns-query"],
   "bootstrap": ["9.9.9.9", "1.1.1.1"],
+  "encrypted_only": true,
   "upstream_mode": "load_balance",
   "upstream_timeout_ms": 4000,
   "conditional": [ { "domain": "fritz.box", "upstream": "192.168.178.1" } ],
@@ -259,13 +265,14 @@ object (`422` on invalid values, nothing is saved then). `blocked_services` and 
 
 | Key | Values |
 |---|---|
-| `upstreams` | 1–20 addresses: `9.9.9.9`, `9.9.9.9:53`, `[2620:fe::fe]:53`, `udp://…`, `tcp://…`, `tls://dns.quad9.net[:853]`, `https://host/path`. |
-| `fallback` | 0–10 addresses, used when all `upstreams` fail |
-| `bootstrap` | 0–10 plain IP addresses (optional `:port`), resolve the host names of DoT/DoH upstreams |
+| `upstreams` | 1–20 addresses, see the table below. Default `https://dns.quad9.net/dns-query`, `https://cloudflare-dns.com/dns-query` |
+| `fallback` | 0–10 addresses, used when all `upstreams` fail. Default `https://9.9.9.9/dns-query`, `https://1.1.1.1/dns-query` (by IP: no bootstrap needed, the certificates carry the IPs) |
+| `bootstrap` | 0–10 plain IP addresses (optional `:port`), only resolve the host names of encrypted upstreams (the certificate check protects against forged answers; answers are cached 60 s – 1 h and dropped when no resolved address can be reached). Default `9.9.9.9`, `1.1.1.1` |
+| `encrypted_only` | default `true`: every entry of `upstreams` and `fallback` must be `tls://`, `https://`, `h3://` or `quic://` (error per entry, e.g. `upstreams.1`: „Nur verschlüsselte Upstreams erlaubt (tls://, https://, h3://, quic://). Klartext-DNS ist nur für bedingte Weiterleitung und private PTR-Anfragen vorgesehen.“). `conditional[].upstream` and `private_upstreams` may be plain only to a private IP (10/8, 172.16/12, 192.168/16, 100.64/10, 127/8, 169.254/16, fc00::/7, fe80::/10, ::1); otherwise they must be encrypted too (error e.g. `conditional.0.upstream` / `private_upstreams.1`: „Bei „Nur verschlüsselte Upstreams“ ist Klartext-DNS nur zu einer privaten IP-Adresse (LAN) erlaubt. Für öffentliche Server tls://, https://, h3:// oder quic:// verwenden.“). With `encrypted_only: false` every valid address is accepted |
 | `upstream_mode` | `load_balance` (weighted by response time), `parallel` (all at once, fastest wins), `sequential` (in order) |
 | `upstream_timeout_ms` | 500–30000 |
 | `conditional` | 0–50 `{domain, upstream}`: queries for the domain and its subdomains go to that upstream |
-| `private_ptr` | `true`: reverse lookups for private addresses (RFC 1918, CGNAT, ULA, link-local) never go to public upstreams; they go to `private_upstreams` or are answered NXDOMAIN |
+| `private_ptr` | `true`: reverse lookups for private addresses (RFC 1918, CGNAT, ULA, link-local), including any name below these reverse zones such as DNS-SD browse names (`lb._dns-sd._udp.0.1.168.192.in-addr.arpa`), never go to public upstreams; they go to `private_upstreams` or are answered NXDOMAIN |
 | `private_upstreams` | 0–10 addresses |
 | `cache_size` | 0–1000000 entries; `cache_min_ttl` 0–3600; `cache_max_ttl` 0–604800 (0 = no limit), min ≤ max |
 | `blocking_mode` | `null_ip` (0.0.0.0 / ::), `nxdomain`, `refused`, `custom_ip` (needs `blocking_ipv4` and/or `blocking_ipv6`) |
@@ -278,9 +285,24 @@ object (`422` on invalid values, nothing is saved then). `blocked_services` and 
 | `disallowed_clients` | IPs/CIDRs (max 200), always refused |
 | `querylog_hours` | 1–2160; `stats_days` 1–90; `lists_update_hours` 0 (off), 1–168 |
 
+Upstream address forms (`upstreams`, `fallback`, `private_upstreams`, `conditional[].upstream`):
+
+| Form | Protocol | Notes |
+|---|---|---|
+| `9.9.9.9`, `9.9.9.9:53`, `[2620:fe::fe]:53`, `udp://1.1.1.1` | DNS | plain UDP (TCP on truncation), IP only, not encrypted |
+| `tcp://1.1.1.1[:53]` | DNS/TCP | plain TCP, IP only, not encrypted |
+| `tls://dns.quad9.net[:853]`, `tls://1.1.1.1` | DoT | DNS-over-TLS (RFC 7858) |
+| `https://dns.quad9.net[:443]/dns-query` | DoH | DNS-over-HTTPS (RFC 8484) over HTTP/2; path default `/dns-query` |
+| `h3://cloudflare-dns.com[:443]/dns-query` | DoH3 | DNS-over-HTTPS over HTTP/3 (QUIC); path default `/dns-query` |
+| `quic://dns.adguard-dns.com[:853]`, `quic://94.140.14.14` | DoQ | DNS-over-QUIC (RFC 9250), default port 853 |
+
+Encrypted forms accept a host name or an IP (`[v6]` in brackets); the certificate is always checked against
+it (no option to skip). Unknown schemes: „Unbekanntes Protokoll: … (erlaubt: udp, tcp, tls, https, h3, quic)“.
+
 ## Cache and upstream test
 
 - `DELETE /api/cache` → `204`.
-- `POST /api/upstreams/test` `{"upstreams": ["…"], "bootstrap": ["…"]}` (1–20 addresses) →
+- `POST /api/upstreams/test` `{"upstreams": ["…"], "bootstrap": ["…"]}` (1–20 addresses, all forms incl. `h3://`
+  and `quic://`; `encrypted_only` does not apply to the test) →
   `200 {"results": [{"upstream","ok","ms","error"}]}`. Asks each upstream for `example.org A` in parallel, 4 s per
   upstream, answers within 6 s. Invalid addresses come back with `ok: false` and an error, not as 422.

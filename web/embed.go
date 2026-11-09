@@ -3,7 +3,7 @@ package web
 
 import "embed"
 
-// FS contains index.html, app.js, style.css and the other static files.
+// FS contains index.html, app.js, style.css, theme.js and the other static files.
 //
-//go:embed index.html app.js style.css
+//go:embed index.html app.js style.css theme.js
 var FS embed.FS

@@ -1,0 +1,14 @@
+.git
+.github
+.DS_Store
+/pk95dns
+/data/
+*.test
+*.out
+*.db
+*.db-*
+*.pem
+*.key
+.env
+.env.*
+docker-compose.yml

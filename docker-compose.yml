@@ -1,0 +1,20 @@
+# PK95 DNS eigenständig (ohne PK95 Core). Start: docker compose up -d
+# Startpasswort: docker compose exec dns cat /var/lib/pk95dns/initial-admin-password
+#
+# network_mode host: Port 53 des Hosts und die echten Client-Adressen (mit Docker-NAT sähe
+# PK95 DNS jede Anfrage von der Bridge-Adresse und Client-Regeln und Statistik wären wertlos).
+services:
+  dns:
+    image: ghcr.io/philippkuhlmann/pk95-dns:latest
+    container_name: pk95-dns
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      PK95DNS_LISTEN: 0.0.0.0:8053
+      PK95DNS_DNS_LISTEN: ":53"
+      TZ: Europe/Berlin
+    volumes:
+      - pk95dns_data:/var/lib/pk95dns
+
+volumes:
+  pk95dns_data:

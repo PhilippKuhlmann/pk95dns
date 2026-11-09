@@ -1,11 +1,12 @@
-// Package upstream talks to upstream DNS servers: plain UDP/TCP, DNS-over-TLS and
-// DNS-over-HTTPS, with bootstrap resolution, routing (conditional forwarding, private PTR),
+// Package upstream talks to upstream DNS servers: plain UDP/TCP, DNS-over-TLS,
+// DNS-over-HTTPS (HTTP/2 and HTTP/3) and DNS-over-QUIC, with bootstrap resolution, routing (conditional forwarding, private PTR),
 // modes (load_balance, parallel, sequential), fallback and health tracking
 // (docs/design.md → Upstreams). It must not import internal/config (config imports it).
 package upstream
 
 import (
 	"context"
+	"net/netip"
 	"time"
 
 	"github.com/miekg/dns"
@@ -14,28 +15,73 @@ import (
 // Spec is a parsed upstream address.
 type Spec struct {
 	Raw    string // as configured
-	Scheme string // "udp" (plain, UDP with TCP retry), "tcp", "tls", "https"
+	Scheme string // "udp" (plain, UDP with TCP retry), "tcp", "tls", "https", "h3", "quic"
 	Host   string // IP or host name
-	Port   string // default 53, 853 (tls), 443 (https)
-	Path   string // https only, e.g. "/dns-query"
+	Port   string // default 53, 853 (tls, quic), 443 (https, h3)
+	Path   string // https and h3 only, e.g. "/dns-query"
 }
 
-// ParseAddress parses "9.9.9.9", "9.9.9.9:53", "[2620:fe::fe]:53", "udp://…", "tcp://…",
-// "tls://host[:port]", "https://host[:port]/path". Plain and tcp:// need an IP address
-// (no host names, they could not be resolved without a resolver). German error messages.
-func ParseAddress(s string) (Spec, error) {
-	panic("not implemented")
+// Protocol returns a short human label of the transport: "DNS", "DNS/TCP", "DoT", "DoH",
+// "DoH3" or "DoQ".
+func (s Spec) Protocol() string {
+	switch s.Scheme {
+	case "tcp":
+		return "DNS/TCP"
+	case "tls":
+		return "DoT"
+	case "https":
+		return "DoH"
+	case "h3":
+		return "DoH3"
+	case "quic":
+		return "DoQ"
+	default:
+		return "DNS"
+	}
 }
 
-// ParseBootstrap accepts a plain IP with optional port and returns "ip:port".
-func ParseBootstrap(s string) (string, error) {
-	panic("not implemented")
+// Encrypted reports whether the transport is encrypted and authenticated (DoT, DoH,
+// DoH3, DoQ).
+func (s Spec) Encrypted() bool {
+	switch s.Scheme {
+	case "tls", "https", "h3", "quic":
+		return true
+	}
+	return false
+}
+
+// Encrypted reports whether addr is a valid address of an encrypted upstream
+// (tls://, https://, h3://, quic://). Invalid addresses are not encrypted.
+func Encrypted(addr string) bool {
+	spec, err := ParseAddress(addr)
+	return err == nil && spec.Encrypted()
+}
+
+// LANOnly reports whether addr is a valid plain address (udp/tcp, no encryption) whose IP
+// is in a private range: 10/8, 172.16/12, 192.168/16, 100.64/10 (CGNAT), 127/8,
+// 169.254/16, fc00::/7, fe80::/10, ::1. Plain DNS to such an address stays in the LAN.
+func LANOnly(addr string) bool {
+	spec, err := ParseAddress(addr)
+	if err != nil || spec.Encrypted() {
+		return false
+	}
+	a, err := netip.ParseAddr(spec.Host)
+	if err != nil {
+		return false
+	}
+	a = a.WithZone("").Unmap()
+	for _, n := range privateNets {
+		if n.Contains(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // Options for a single upstream.
 type Options struct {
 	Timeout   time.Duration // per exchange
-	Bootstrap []string      // "ip[:port]" resolvers for DoT/DoH host names; empty = system resolver
+	Bootstrap []string      // "ip[:port]" resolvers for DoT/DoH/DoQ host names; empty = system resolver
 }
 
 // Upstream is one upstream server. Exchange must be safe for concurrent use and must not
@@ -48,7 +94,32 @@ type Upstream interface {
 
 // New creates an upstream for a configured address.
 func New(addr string, opt Options) (Upstream, error) {
-	panic("not implemented")
+	res, err := newResolver(opt.Bootstrap, timeoutOf(opt))
+	if err != nil {
+		return nil, err
+	}
+	return newWithResolver(addr, opt, res)
+}
+
+// newWithResolver creates an upstream that resolves DoT/DoH/DoQ host names through res
+// (shared by all upstreams of a Router).
+func newWithResolver(addr string, opt Options, res *resolver) (Upstream, error) {
+	spec, err := ParseAddress(addr)
+	if err != nil {
+		return nil, err
+	}
+	switch spec.Scheme {
+	case "tls":
+		return newDoT(spec, opt, res), nil
+	case "https":
+		return newDoH(spec, opt, res), nil
+	case "h3":
+		return newDoH3(spec, opt, res), nil
+	case "quic":
+		return newDoQ(spec, opt, res), nil
+	default:
+		return newPlain(spec, opt), nil
+	}
 }
 
 // Route sends a domain and its subdomains to one upstream (conditional forwarding).
@@ -79,42 +150,4 @@ type Health struct {
 	Failures  int64   `json:"failures"`
 	LastError string  `json:"last_error"`
 	LastOK    int64   `json:"-"` // unix ms of the last good answer, 0 = never
-}
-
-// Router resolves queries through the configured upstreams.
-type Router struct {
-	// unexported fields
-}
-
-// NewRouter validates the config and creates all upstreams.
-func NewRouter(cfg Config) (*Router, error) {
-	panic("not implemented")
-}
-
-// Resolve answers req (it is not modified). Returns the answer, the address of the upstream
-// that answered ("" when answered locally, e.g. private PTR NXDOMAIN) and an error when no
-// upstream gave a good answer. The answer's Id equals req.Id.
-func (r *Router) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, string, error) {
-	panic("not implemented")
-}
-
-// Health returns the health of the main upstreams (config order).
-func (r *Router) Health() []Health {
-	panic("not implemented")
-}
-
-// Close closes all upstreams (idle connections). Resolve calls in flight may still finish.
-func (r *Router) Close() {
-	panic("not implemented")
-}
-
-// Test asks addr for "example.org A" and returns the round trip time.
-func Test(ctx context.Context, addr string, bootstrap []string, timeout time.Duration) (time.Duration, error) {
-	panic("not implemented")
-}
-
-// IsPrivatePTR reports whether name (lowercase, no trailing dot) is a reverse lookup in a
-// private range: 10/8, 172.16/12, 192.168/16, 100.64/10, 127/8, 169.254/16, fc00::/7, fe80::/10, ::1.
-func IsPrivatePTR(name string) bool {
-	panic("not implemented")
 }
