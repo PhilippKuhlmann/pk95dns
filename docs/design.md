@@ -12,7 +12,7 @@ container, the admin UI lives in Core, the app sends events to Core).
 | `PK95DNS_DNS_LISTEN` | `:53` | DNS over UDP and TCP (dual stack) |
 | `PK95DNS_DATA_DIR` | `/var/lib/pk95dns` | SQLite database `pk95dns.db`, list copies `lists/<id>.txt`, `initial-admin-password` |
 | `PK95_CORE_MODE`, `PK95_CORE_URL`, `PK95_CORE_TOKEN` | – | Core mode, see app protocol |
-| `TZ` | – | time zone (statistics buckets are UTC hours, display is the client's business) |
+| `TZ` | – | time zone: the daily bars of the 30-day statistics run from local midnight to midnight (statistics are stored per UTC hour; timestamps in the API stay UTC ms). The binary embeds the zone database (`time/tzdata`) |
 
 Container: `network_mode: host` (port 53 of the LXC and the real client addresses; Docker NAT
 would hide the clients). Runs as root inside the container (port 53, no file capabilities in an

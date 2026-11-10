@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -38,6 +39,10 @@ func newTest(t *testing.T) (*Recorder, *store.Store, *clock) {
 	}
 	t.Cleanup(func() { st.Close() })
 	r := New(st)
+	if r.loc != time.Local {
+		t.Fatal("day boundaries must default to time.Local (TZ)")
+	}
+	r.loc = time.UTC // the tests below do not depend on the machine's time zone
 	c := newClock(base)
 	r.now = c.now
 	return r, st, c
@@ -62,8 +67,13 @@ func TestHourOf(t *testing.T) {
 			t.Errorf("hourOf(%d) = %d, want %d", tt.in, got, tt.want)
 		}
 	}
-	if got, want := dayOf(base.Unix()), time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC).Unix(); got != want {
-		t.Errorf("dayOf = %d, want %d", got, want)
+	days := dayStarts(base, time.UTC, 2)
+	if got, want := days, []int64{
+		time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC).Unix(),
+		time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC).Unix(),
+		time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC).Unix(),
+	}; !slices.Equal(got, want) {
+		t.Errorf("dayStarts = %v, want %v", got, want)
 	}
 }
 
@@ -119,7 +129,7 @@ func TestStatusMapping(t *testing.T) {
 func TestSummaryWindows(t *testing.T) {
 	r, st, _ := newTest(t)
 	cur := baseHour()
-	today := dayOf(cur)
+	today := dayStarts(base, time.UTC, 1)[0]
 	tests := []struct {
 		hours, wantHours, points int
 		gran                     string
@@ -629,5 +639,103 @@ func TestConcurrent(t *testing.T) {
 	}
 	if len(s.TopClients) != goroutines || s.TopClients[0].Count != per {
 		t.Fatalf("clients %+v", s.TopClients)
+	}
+}
+
+// The 30-day view uses local days: in Europe/Berlin a bar runs from local midnight to
+// local midnight, 23 hours on the day summer time starts (29.03.2026) and 25 hours on the
+// day it ends (25.10.2026). The API keeps UTC milliseconds.
+func TestDailyBucketsFollowLocalTimeAcrossDST(t *testing.T) {
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := func(y int, m time.Month, d, h, min int) time.Time { return time.Date(y, m, d, h, min, 0, 0, berlin) }
+	utc := func(y int, m time.Month, d, h int) int64 { return time.Date(y, m, d, h, 0, 0, 0, time.UTC).UnixMilli() }
+
+	tests := []struct {
+		name   string
+		now    time.Time
+		day    time.Time // the day with the change
+		start  int64     // its start in UTC ms
+		next   int64     // start of the following day in UTC ms
+		hours  int64     // its length
+		events []time.Time
+		want   map[int]int64 // series index (0 = 29 days ago) → queries
+	}{
+		{
+			name: "summer time starts", now: at(2026, 3, 30, 12, 0), day: at(2026, 3, 29, 0, 0),
+			start: utc(2026, 3, 28, 23), next: utc(2026, 3, 29, 22), hours: 23,
+			events: []time.Time{
+				at(2026, 3, 28, 23, 30), // 28.03. (22:30 UTC)
+				at(2026, 3, 29, 0, 30),  // 29.03. although still the 28th in UTC
+				at(2026, 3, 29, 1, 59),  // 29.03., the last minute before the clock jumps
+				at(2026, 3, 29, 3, 0),   // 29.03., right after the jump
+				at(2026, 3, 29, 23, 30), // 29.03. (21:30 UTC)
+				at(2026, 3, 30, 0, 15),  // 30.03. although still the 29th in UTC
+			},
+			want: map[int]int64{27: 1, 28: 4, 29: 1},
+		},
+		{
+			name: "summer time ends", now: at(2026, 10, 26, 12, 0), day: at(2026, 10, 25, 0, 0),
+			start: utc(2026, 10, 24, 22), next: utc(2026, 10, 25, 23), hours: 25,
+			events: []time.Time{
+				at(2026, 10, 24, 23, 30),                       // 24.10. (21:30 UTC)
+				at(2026, 10, 25, 0, 30),                        // 25.10. although still the 24th in UTC
+				time.Date(2026, 10, 25, 0, 30, 0, 0, time.UTC), // 02:30 summer time (CEST)
+				time.Date(2026, 10, 25, 1, 30, 0, 0, time.UTC), // 02:30 again, winter time (CET)
+				at(2026, 10, 25, 23, 30),                       // 25.10. (22:30 UTC)
+				at(2026, 10, 26, 0, 15),                        // 26.10. (23:15 UTC on the 25th)
+			},
+			want: map[int]int64{27: 1, 28: 4, 29: 1},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, _, c := newTest(t)
+			r.loc = berlin
+			c.set(tt.now)
+			for _, ts := range tt.events {
+				r.Record(Event{TS: ts, Client: "192.168.1.20", Name: "example.org", Status: "ok"})
+			}
+			check := func(label string, r *Recorder) {
+				s := summary(t, r, 720, tt.now)
+				if s.Granularity != "day" || len(s.Series) != 30 {
+					t.Fatalf("%s: %s %d", label, s.Granularity, len(s.Series))
+				}
+				if s.Series[28].T != tt.start || s.Series[29].T != tt.next {
+					t.Fatalf("%s: day starts %s / %s, want %s / %s", label,
+						time.UnixMilli(s.Series[28].T).UTC(), time.UnixMilli(s.Series[29].T).UTC(),
+						time.UnixMilli(tt.start).UTC(), time.UnixMilli(tt.next).UTC())
+				}
+				if got := (s.Series[29].T - s.Series[28].T) / 3_600_000; got != tt.hours {
+					t.Fatalf("%s: the day has %d hours, want %d", label, got, tt.hours)
+				}
+				// every bar starts at local midnight
+				for i, p := range s.Series {
+					if h, m, sec := time.UnixMilli(p.T).In(berlin).Clock(); h != 0 || m != 0 || sec != 0 {
+						t.Fatalf("%s: bar %d starts at %02d:%02d local", label, i, h, m)
+					}
+				}
+				var sum int64
+				for i, p := range s.Series {
+					if p.Queries != tt.want[i] {
+						t.Errorf("%s: bar %d (%s) = %d, want %d", label, i, time.UnixMilli(p.T).In(berlin).Format("02.01."), p.Queries, tt.want[i])
+					}
+					sum += p.Queries
+				}
+				if sum != s.Totals.Queries || sum != int64(len(tt.events)) {
+					t.Errorf("%s: series sum %d, totals %d, events %d", label, sum, s.Totals.Queries, len(tt.events))
+				}
+			}
+			check("memory", r)
+			// The same from the store (a restarted app).
+			if err := r.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			r2 := New(r.st)
+			r2.loc, r2.now = berlin, c.now
+			check("store", r2)
+		})
 	}
 }

@@ -146,6 +146,7 @@ type Recorder struct {
 
 	// Timing, replaced in tests.
 	now        func() time.Time
+	loc        *time.Location // day boundaries of the 30-day view: time.Local (from TZ)
 	flushEvery time.Duration
 	pruneEvery time.Duration
 
@@ -161,6 +162,7 @@ func New(st *store.Store) *Recorder {
 	return &Recorder{
 		st:         st,
 		now:        time.Now,
+		loc:        time.Local,
 		flushEvery: time.Minute,
 		pruneEvery: time.Hour,
 		buckets:    map[int64]*bucket{},
@@ -173,8 +175,17 @@ func hourOf(sec int64) int64 {
 	return sec - ((sec%hourSec)+hourSec)%hourSec
 }
 
-func dayOf(sec int64) int64 {
-	return sec - ((sec%daySec)+daySec)%daySec
+// dayStarts returns the starts of the last n local days in loc up to and including the
+// day of now, plus the start of the next day (n+1 values, unix seconds). time.Date
+// normalises, so days around a DST change have 23 or 25 hours and a midnight that does not
+// exist starts the day at the first valid time.
+func dayStarts(now time.Time, loc *time.Location, n int) []int64 {
+	y, m, d := now.In(loc).Date()
+	out := make([]int64, n+1)
+	for i := range out {
+		out[i] = time.Date(y, m, d-(n-1)+i, 0, 0, 0, 0, loc).Unix()
+	}
+	return out
 }
 
 func isBlocked(status string) bool { return status == "blocked" || status == "blocked_service" }
@@ -466,10 +477,12 @@ func round(v float64, decimals int) float64 {
 }
 
 // Summary for the last hours (24, 168 or 720; others → 24) up to now, store + memory.
-// 720 has daily buckets (UTC days), else hourly; buckets without data are present with 0.
-// Top lists at most 20 entries. The 24/168 windows are the last N hours including the
-// current one; the 720 window is the last 30 UTC days including today, so the daily
-// series covers it exactly.
+// 720 has daily buckets (local days of r.loc, so a bar runs from midnight to midnight
+// local time, 23 or 25 hours around a DST change), else hourly; buckets without data are
+// present with 0. Top lists at most 20 entries. The 24/168 windows are the last N hours
+// including the current one; the 720 window is the last 30 local days including today,
+// so the daily series covers it exactly. Statistics are kept per UTC hour, so in a zone
+// with a half-hour offset a day starts with the first full hour after local midnight.
 func (r *Recorder) Summary(hours int, now time.Time) (Summary, error) {
 	switch hours {
 	case 24, 168, 720:
@@ -479,10 +492,12 @@ func (r *Recorder) Summary(hours int, now time.Time) (Summary, error) {
 	cur := hourOf(now.Unix())
 	to := cur + hourSec
 	var from int64
+	var days []int64
 	gran := "hour"
 	if hours == 720 {
 		gran = "day"
-		from = dayOf(cur) - 29*daySec
+		days = dayStarts(now, r.loc, 30)
+		from = hourOf(days[0] + hourSec - 1) // first full stored hour of the first day
 	} else {
 		from = cur - int64(hours-1)*hourSec
 	}
@@ -516,10 +531,14 @@ func (r *Recorder) Summary(hours int, now time.Time) (Summary, error) {
 	} else {
 		s.Series = make([]Point, 30)
 		for i := range s.Series {
-			s.Series[i].T = (from + int64(i)*daySec) * 1000
+			s.Series[i].T = days[i] * 1000
 		}
 		for h, st := range c.hours {
-			i := (h - from) / daySec
+			// the day whose next start lies after the hour (h >= from >= days[0])
+			i := sort.Search(len(s.Series), func(i int) bool { return days[i+1] > h })
+			if i == len(s.Series) {
+				continue // cannot happen: to <= end of today
+			}
 			s.Series[i].Queries += st.Queries
 			s.Series[i].Blocked += st.Blocked
 		}
