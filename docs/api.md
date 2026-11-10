@@ -76,6 +76,10 @@ switched on again. `{"enabled": true}` switches on. Answer: the `protection` obj
 ### `GET /api/stats?hours=24`
 
 `hours`: `24`, `168` (7 days) or `720` (30 days); other values → 24. Series: hourly for 24 and 168, daily for 720.
+Daily points are **local days** of the app's time zone (`TZ`, PK95 Core passes its display time zone): each `t` is
+a local midnight, so a day has 23 or 25 hours around a daylight saving change. `t` stays UTC milliseconds; the
+30-day window is the last 30 local days including today. Statistics are stored per UTC hour, so in a zone with a
+half-hour offset a day starts with the first full hour after local midnight.
 
 ```json
 {

@@ -97,7 +97,7 @@ setzen (mindestens 12 Zeichen). Danach die IP des Servers im Router als DNS-Serv
 | `PK95DNS_LISTEN` | `0.0.0.0:8053` | API und Oberfläche |
 | `PK95DNS_DNS_LISTEN` | `:53` | DNS über UDP und TCP |
 | `PK95DNS_DATA_DIR` | `/var/lib/pk95dns` | Datenbank `pk95dns.db`, Listenkopien `lists/`, Startpasswort |
-| `TZ` | – | Zeitzone für das Log |
+| `TZ` | – | Zeitzone für das Log und die Tagesbalken der 30-Tage-Statistik (Mitternacht bis Mitternacht Ortszeit) |
 
 Die Oberfläche läuft nur über HTTP. Port 8053 deshalb nicht ins Internet freigeben, von außen per VPN
 oder SSH-Tunnel (`ssh -L 8053:127.0.0.1:8053 root@server`) oder hinter einem Reverse Proxy mit TLS.

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	_ "time/tzdata" // TZ works without /usr/share/zoneinfo (static binary, minimal images)
 
 	"pk95dns/internal/app"
 )
