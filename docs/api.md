@@ -86,7 +86,7 @@ half-hour offset a day starts with the first full hour after local midnight.
   "hours": 24,
   "granularity": "hour",
   "totals": { "queries": 13530, "blocked": 2104, "blocked_pct": 15.6, "cached": 9120, "safesearch": 12, "services": 40, "avg_ms": 6.2 },
-  "series": [ { "t": 1762696800000, "queries": 610, "blocked": 92 } ],
+  "series": [ { "t": 1762696800000, "queries": 610, "blocked": 92, "cached": 401 } ],
   "top_domains": [ { "name": "example.org", "count": 812 } ],
   "top_blocked": [ { "name": "ads.example.net", "count": 330 } ],
   "top_clients": [ { "ip": "192.168.1.20", "name": "Laptop", "count": 4210, "blocked": 600 } ],
@@ -94,7 +94,11 @@ half-hour offset a day starts with the first full hour after local midnight.
 }
 ```
 
-`blocked` counts statuses `blocked` and `blocked_service`. Top lists have at most 20 entries. `name` of a client
+`blocked` counts statuses `blocked` and `blocked_service`. `cached` counts answers from the cache that were not
+blocked (a cache hit can still be blocked by the CNAME check), in `totals` and per point; per point
+`cached ≤ queries − blocked`, so a bar splits into blocked, cached and forwarded. `series[].cached` is new in 1.1.3;
+clients that do not know it can ignore it, hours recorded by older versions are capped to fit. `totals.cached` is the
+sum of the points. Top lists have at most 20 entries. `name` of a client
 is the configured client name, else its reverse-DNS host name, else `""`.
 
 ### `DELETE /api/stats` → `204` (resets all statistics)

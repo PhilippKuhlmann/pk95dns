@@ -2,10 +2,12 @@ package stats
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -737,5 +739,64 @@ func TestDailyBucketsFollowLocalTimeAcrossDST(t *testing.T) {
 			r2.loc, r2.now = berlin, c.now
 			check("store", r2)
 		})
+	}
+}
+
+// series[].cached: cache answers that were not blocked, in every window, never more than
+// queries - blocked of the bar, and summing up to totals.cached.
+func TestSeriesCached(t *testing.T) {
+	r, st, _ := newTest(t)
+	cur := baseHour()
+	now := base
+	rec := func(status string, cached bool) {
+		r.Record(Event{TS: now, Client: "192.168.1.20", Name: "example.org", Status: status, Cached: cached})
+	}
+	rec("ok", true)       // counted
+	rec("allowed", true)  // counted
+	rec("ok", false)      // not cached
+	rec("blocked", true)  // cached hit blocked by the CNAME check: not counted
+	rec("blocked", false) // blocked
+	// An hour stored by an older version that counted blocked cache hits: 3 queries,
+	// 2 blocked, 3 cached → capped at 1.
+	if err := st.SaveHour(store.HourStats{Hour: cur - 2*hourSec, Queries: 3, Blocked: 2, Cached: 3}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, hours := range []int{24, 168, 720} {
+		s := summary(t, r, hours, now)
+		var sum int64
+		for i, p := range s.Series {
+			if p.Cached > p.Queries-p.Blocked || p.Cached < 0 {
+				t.Fatalf("%d: bar %d cached %d > queries %d - blocked %d", hours, i, p.Cached, p.Queries, p.Blocked)
+			}
+			sum += p.Cached
+		}
+		if sum != 3 || s.Totals.Cached != 3 {
+			t.Errorf("%d: series cached %d, totals.cached %d, want 3 (2 now + 1 capped)", hours, sum, s.Totals.Cached)
+		}
+		last := s.Series[len(s.Series)-1]
+		if hours != 720 && (last.Queries != 5 || last.Blocked != 2 || last.Cached != 2) {
+			t.Errorf("%d: current hour %+v", hours, last)
+		}
+	}
+
+	// The same after a flush, read from the store by a restarted recorder.
+	if err := r.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	r2 := New(st)
+	r2.loc, r2.now = time.UTC, r.now
+	s := summary(t, r2, 24, now)
+	if last := s.Series[23]; last.Cached != 2 || s.Totals.Cached != 3 {
+		t.Fatalf("from store: last %+v, totals.cached %d", last, s.Totals.Cached)
+	}
+
+	// JSON: every point carries "cached" (additive field, also 0).
+	raw, err := json.Marshal(s.Series[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"cached":0`) {
+		t.Fatalf("point JSON %s", raw)
 	}
 }

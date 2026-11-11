@@ -51,6 +51,16 @@ type Point struct {
 	T       int64 `json:"t"` // unix ms of the bucket start
 	Queries int64 `json:"queries"`
 	Blocked int64 `json:"blocked"`
+	Cached  int64 `json:"cached"` // answered from the cache, not blocked; <= Queries - Blocked
+}
+
+// add sums one stored or in-memory hour into the point. Each hour's cache count is capped
+// at its answers that were not blocked, so the segments of a bar always fit (hours
+// recorded before blocked cache hits were excluded could exceed it).
+func (p *Point) add(h store.HourStats) {
+	p.Queries += h.Queries
+	p.Blocked += h.Blocked
+	p.Cached += min(max(h.Cached, 0), max(h.Queries-h.Blocked, 0))
 }
 
 type NameCount struct {
@@ -233,7 +243,9 @@ func (r *Recorder) Record(e Event) {
 	if e.Status == "safesearch" {
 		t.SafeSearch++
 	}
-	if e.Cached {
+	// Answered from the cache and not blocked (a cached answer can still be blocked by
+	// the CNAME check): the same segment the overview shows next to "blocked".
+	if e.Cached && !blocked {
 		t.Cached++
 	}
 	b.add(kindDomain, e.Name, 0, ms)
@@ -526,7 +538,8 @@ func (r *Recorder) Summary(hours int, now time.Time) (Summary, error) {
 		s.Series = make([]Point, hours)
 		for i := range s.Series {
 			h := from + int64(i)*hourSec
-			s.Series[i] = Point{T: h * 1000, Queries: c.hours[h].Queries, Blocked: c.hours[h].Blocked}
+			s.Series[i] = Point{T: h * 1000}
+			s.Series[i].add(c.hours[h])
 		}
 	} else {
 		s.Series = make([]Point, 30)
@@ -539,9 +552,15 @@ func (r *Recorder) Summary(hours int, now time.Time) (Summary, error) {
 			if i == len(s.Series) {
 				continue // cannot happen: to <= end of today
 			}
-			s.Series[i].Queries += st.Queries
-			s.Series[i].Blocked += st.Blocked
+			s.Series[i].add(st)
 		}
+	}
+
+	// The series covers the window exactly: its capped cache counts are the total, so the
+	// tile "Aus dem Cache" and the bars agree.
+	s.Totals.Cached = 0
+	for _, p := range s.Series {
+		s.Totals.Cached += p.Cached
 	}
 
 	s.TopDomains = nameCounts(c.tops[kindDomain])
