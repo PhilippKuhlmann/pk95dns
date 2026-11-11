@@ -105,6 +105,7 @@ func TestMigrateV1Rewrites(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "v1.db")
 	buildV1(t, path,
 		`INSERT INTO lists (name, url, kind) VALUES ('L', 'https://l', 'block')`,
+		`INSERT INTO stats_hours (hour, queries, blocked, cached, safesearch, services, elapsed_ms) VALUES (3600, 5, 1, 2, 1, 0, 7.5)`,
 		`INSERT INTO rewrites (domain, answer, enabled, created_at) VALUES ('nas.lan', '192.168.1.10', 1, 111)`, // 1
 		`INSERT INTO rewrites (domain, answer, enabled, created_at) VALUES ('gone.lan', '10.0.0.1', 1, 222)`,    // 2
 		`INSERT INTO rewrites (domain, answer, enabled, created_at) VALUES ('nas.lan', 'fd00::10', 0, 333)`,     // 3
@@ -118,8 +119,16 @@ func TestMigrateV1Rewrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if v := userVersion(t, s); v != 2 {
+	if v := userVersion(t, s); v != len(migrations) {
 		t.Fatalf("user_version = %d", v)
+	}
+	// v3: hours stored before the local column existed keep their values and report 0.
+	hours, err := s.LoadHours(0, 7200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []HourStats{{Hour: 3600, Queries: 5, Blocked: 1, Cached: 2, SafeSearch: 1, ElapsedMS: 7.5}}; !reflect.DeepEqual(hours, want) {
+		t.Fatalf("old hour after migration: %+v", hours)
 	}
 	if tableExists(t, s, "rewrites") {
 		t.Fatal("rewrites still exists")
@@ -155,7 +164,7 @@ func TestMigrateV1Rewrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if all, _ := s.Records(RecordFilter{}); len(all) != 5 || userVersion(t, s) != 2 {
+	if all, _ := s.Records(RecordFilter{}); len(all) != 5 || userVersion(t, s) != len(migrations) {
 		t.Fatalf("reopen: %d records, version %d", len(all), userVersion(t, s))
 	}
 }
@@ -217,7 +226,7 @@ func TestMigrateV2FailureRollsBack(t *testing.T) {
 
 func TestFreshDatabaseIsV2(t *testing.T) {
 	s := openTest(t)
-	if v := userVersion(t, s); v != 2 || v != len(migrations) {
+	if v := userVersion(t, s); v != 3 || v != len(migrations) {
 		t.Fatalf("user_version = %d", v)
 	}
 	if tableExists(t, s, "rewrites") || !tableExists(t, s, "zones") || !tableExists(t, s, "records") {

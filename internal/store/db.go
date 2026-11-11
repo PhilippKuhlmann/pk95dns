@@ -27,6 +27,7 @@ type migration func(tx *sql.Tx) error
 var migrations = []migration{
 	execMigration(schemaV1), // 1: initial schema
 	migrateV2,               // 2: zones and records replace rewrites
+	execMigration(`ALTER TABLE stats_hours ADD COLUMN local INTEGER NOT NULL DEFAULT 0`), // 3: answers from own zones and records per hour
 }
 
 func execMigration(ddl string) migration {
