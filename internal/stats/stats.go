@@ -43,6 +43,7 @@ type Totals struct {
 	BlockedPct float64 `json:"blocked_pct"`
 	Cached     int64   `json:"cached"`
 	SafeSearch int64   `json:"safesearch"`
+	Local      int64   `json:"local"` // answers from own zones and records (status rewrite), without SafeSearch
 	Services   int64   `json:"services"`
 	AvgMS      float64 `json:"avg_ms"`
 }
@@ -242,6 +243,9 @@ func (r *Recorder) Record(e Event) {
 	}
 	if e.Status == "safesearch" {
 		t.SafeSearch++
+	}
+	if e.Status == "rewrite" { // SafeSearch has its own status, so nothing is counted twice
+		t.Local++
 	}
 	// Answered from the cache and not blocked (a cached answer can still be blocked by
 	// the CNAME check): the same segment the overview shows next to "blocked".
@@ -526,6 +530,7 @@ func (r *Recorder) Summary(hours int, now time.Time) (Summary, error) {
 		s.Totals.Blocked += h.Blocked
 		s.Totals.Cached += h.Cached
 		s.Totals.SafeSearch += h.SafeSearch
+		s.Totals.Local += h.Local
 		s.Totals.Services += h.Services
 		elapsed += h.ElapsedMS
 	}

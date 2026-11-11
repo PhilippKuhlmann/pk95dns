@@ -259,7 +259,7 @@ The app sends `upstream.down` when every main upstream failed for 60 s and `upst
 SQLite in WAL mode, one connection pool, `busy_timeout`. Tables (see `internal/store`): `settings` (key,
 JSON value), `lists`, `custom_rules` (single row), `zones`, `records` (schema v2 migrated the v1 `rewrites`
 with the same ids), `clients`, `users`, `sessions` (token hash),
-`queries` (query log, indexes on `ts`, `name`, `client_ip`), `stats_hours` (hour, totals),
+`queries` (query log, indexes on `ts`, `name`, `client_ip`), `stats_hours` (hour, totals; schema v3 added `local`),
 `stats_top` (hour, kind, key, count – top 100 per kind and hour). List contents live in
 `<data>/lists/<id>.txt` so a restart does not need the network.
 

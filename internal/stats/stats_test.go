@@ -800,3 +800,41 @@ func TestSeriesCached(t *testing.T) {
 		t.Fatalf("point JSON %s", raw)
 	}
 }
+
+// totals.local: answers from own zones and records (status rewrite) – SafeSearch answers
+// have their own status and are not counted twice.
+func TestTotalsLocal(t *testing.T) {
+	r, st, _ := newTest(t)
+	rec := func(status string) {
+		r.Record(Event{TS: base, Client: "192.168.1.20", Name: "nas.home.lan", Status: status})
+	}
+	rec("rewrite")
+	rec("rewrite")
+	rec("safesearch")
+	rec("ok")
+	rec("blocked")
+	// An hour stored before the column existed reads as local 0.
+	if err := st.SaveHour(store.HourStats{Hour: baseHour() - 3*hourSec, Queries: 4, SafeSearch: 1}, nil); err != nil {
+		t.Fatal(err)
+	}
+	check := func(label string, r *Recorder) {
+		for _, hours := range []int{24, 168, 720} {
+			s := summary(t, r, hours, base)
+			if s.Totals.Local != 2 || s.Totals.SafeSearch != 2 || s.Totals.Queries != 9 {
+				t.Errorf("%s %d: %+v", label, hours, s.Totals)
+			}
+		}
+	}
+	check("memory", r)
+	if err := r.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	r2 := New(st)
+	r2.loc, r2.now = time.UTC, r.now
+	check("store", r2)
+
+	raw, err := json.Marshal(Totals{})
+	if err != nil || !strings.Contains(string(raw), `"local":0`) {
+		t.Fatalf("totals JSON %s %v", raw, err)
+	}
+}
