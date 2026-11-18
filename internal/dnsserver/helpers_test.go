@@ -358,12 +358,17 @@ func baseSettings(upstreams ...string) config.Settings {
 
 func newRouter(t *testing.T, s config.Settings) *upstream.Router {
 	t.Helper()
+	routes := make([]upstream.Route, 0, len(s.Conditional)) // like app.routerConfig
+	for _, c := range s.Conditional {
+		routes = append(routes, upstream.Route{Domain: c.Domain, Upstream: c.Upstream})
+	}
 	r, err := upstream.NewRouter(upstream.Config{
 		Upstreams:        s.Upstreams,
 		Fallback:         s.Fallback,
 		Bootstrap:        s.Bootstrap,
 		Mode:             s.UpstreamMode,
 		Timeout:          s.UpstreamTimeout(),
+		Routes:           routes,
 		PrivatePTR:       s.PrivatePTR,
 		PrivateUpstreams: s.PrivateUpstreams,
 	})

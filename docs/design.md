@@ -95,6 +95,15 @@ every change) and answers lookups; the store keeps `zones` and `records` (docs/a
   (a wildcard never matches names that exist, and does not cover the encloser itself).
 - otherwise NXDOMAIN with the SOA in authority (negative TTL = zone `ttl`).
 
+**Conditional forwarding vs. own data** (the more specific one wins): `records.Result.Match` is what a
+name matched – the name itself when it has records (or is a zone apex), the base of a wildcard (`example.org` for
+`*.example.org`), or the zone name for NXDOMAIN, NODATA of an empty non-terminal and the like. If a `conditional`
+domain covers the query name and lies strictly below `Match`, the own data steps aside and the name is
+forwarded (`state.forwarded` via `Index.ResolveFunc`, also for CNAME targets inside the index). A record for
+exactly the asked name always wins; equal depth keeps the own data. Example: `*.example.de` and a forwarding of
+`intern.example.de` → `pc1.intern.example.de` goes to the forwarding; a zone `example.de` delegates
+`intern.example.de` to it instead of answering NXDOMAIN.
+
 **Single records** (no zone covers the name): exact name beats the most specific `*.` wildcard; matching type →
 answer; CNAME → chase like above; A/AAAA asked and the name has only the other address family → empty NOERROR
 (no SOA, split horizon); any other type without records, or no records → continue
@@ -247,7 +256,8 @@ share of the time left (remaining / upstreams left), and connecting to a host wi
 each address such a share too, so one upstream or address that silently drops packets cannot use up the
 whole budget.
 
-Routing: longest matching `conditional` domain wins (its upstream only, no fallback). Reverse lookups for
+Routing: longest matching `conditional` domain wins (its upstream only, no fallback); against own zones and
+records see "Conditional forwarding vs. own data" above. Reverse lookups for
 private ranges (any name below their reverse zone, e.g. DNS-SD browse names) with `private_ptr` → `private_upstreams` (or NXDOMAIN when empty). Everything else → main
 upstreams.
 

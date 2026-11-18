@@ -43,7 +43,16 @@ type Result struct {
 	Depth         int    // CNAME records in Answer
 	Reason        string // ReasonZone or ReasonRecord
 	Zone          string // name of the answering zone ("" for single records)
+	// Match is what the (first) name matched, lowercase: the name itself when it has records
+	// (or is a zone apex), the base of a wildcard ("example.org" for "*.example.org"), or
+	// the zone name for negative zone answers and empty non-terminals. The DNS server
+	// compares it with conditional forwarding domains (the more specific one wins).
+	Match string
 }
+
+// PassFunc decides for a found name whether the index should leave it to the upstreams:
+// name is the normalised query name of the step, match its Result.Match.
+type PassFunc func(name, match string) bool
 
 // Index is the compiled, immutable lookup structure of the enabled zones and records. It is
 // safe for concurrent use; build a new one with Compile on every change and swap the pointer
@@ -382,7 +391,17 @@ func (ix *Index) Lookup(qname string, qtype uint16) Result {
 // target is not in the index, CNAMETarget names it for the upstream. A loop or a longer
 // chain gives SERVFAIL without records.
 func (ix *Index) Resolve(qname string, qtype uint16) Result {
+	return ix.ResolveFunc(qname, qtype, nil)
+}
+
+// ResolveFunc is Resolve, but every step whose name pass reports true counts as not in the
+// index: the question itself then gives Found false, a CNAME target is left to the
+// upstream (CNAMETarget). pass nil = Resolve.
+func (ix *Index) ResolveFunc(qname string, qtype uint16, pass PassFunc) Result {
 	res := ix.Lookup(qname, qtype)
+	if res.Found && pass != nil && pass(NormalizeName(qname), res.Match) {
+		return Result{}
+	}
 	if !res.Found || res.CNAMETarget == "" {
 		return res
 	}
@@ -396,7 +415,7 @@ func (ix *Index) Resolve(qname string, qtype uint16) Result {
 		}
 		seen[target] = true
 		next := ix.lookup(target, dns.Fqdn(target), qtype, true)
-		if !next.Found {
+		if !next.Found || (pass != nil && pass(target, next.Match)) {
 			return res // the upstream resolves the target
 		}
 		res.Depth += next.Depth
@@ -427,10 +446,11 @@ func (ix *Index) lookup(qn, owner string, qtype uint16, extra bool) Result {
 	if z := ix.zoneOf(qn); z != nil {
 		return ix.zoneLookup(z, qn, owner, qtype, extra)
 	}
-	n := ix.single.names[qn]
+	n, match := ix.single.names[qn], qn
 	if n == nil && len(ix.single.wild) > 0 {
 		for p, ok := parent(qn); ok; p, ok = parent(p) {
 			if n = ix.single.wild[p]; n != nil {
+				match = p
 				break
 			}
 		}
@@ -438,7 +458,7 @@ func (ix *Index) lookup(qn, owner string, qtype uint16, extra bool) Result {
 	if n == nil {
 		return Result{}
 	}
-	res := Result{Found: true, Rcode: dns.RcodeSuccess, Reason: ReasonRecord}
+	res := Result{Found: true, Rcode: dns.RcodeSuccess, Reason: ReasonRecord, Match: match}
 	if qtype == dns.TypeAXFR || qtype == dns.TypeIXFR {
 		res.Rcode = dns.RcodeRefused
 		return res
@@ -468,7 +488,10 @@ func hasAddress(n *node, qtype uint16) bool {
 }
 
 func (ix *Index) zoneLookup(z *zoneData, qn, owner string, qtype uint16, extra bool) Result {
-	res := Result{Found: true, Authoritative: true, Rcode: dns.RcodeSuccess, Reason: ReasonZone, Zone: z.name}
+	res := Result{Found: true, Authoritative: true, Rcode: dns.RcodeSuccess, Reason: ReasonZone, Zone: z.name, Match: z.name}
+	if z.names[qn] != nil || qn == z.name {
+		res.Match = qn // the name itself has records (or is the apex)
+	}
 	switch qtype {
 	case dns.TypeAXFR, dns.TypeIXFR:
 		res.Authoritative = false
@@ -496,6 +519,7 @@ func (ix *Index) zoneLookup(z *zoneData, qn, owner string, qtype uint16, extra b
 		}
 	}
 	if w := z.names["*."+ce]; w != nil {
+		res.Match = ce
 		ix.answer(&res, z, w, false, owner, qtype, extra)
 		return res
 	}

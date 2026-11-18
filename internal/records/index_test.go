@@ -519,3 +519,38 @@ func unescapeTXT(s string) string {
 }
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// Result.Match tells the DNS server how specific a hit is (conditional forwarding).
+func TestResultMatch(t *testing.T) {
+	ix := Compile(
+		[]Zone{{ID: 1, Name: "corp.lan", TTL: 300, PrimaryNS: "ns.corp.lan", Enabled: true}},
+		[]Record{
+			{Name: "*.home.lan", Type: TypeA, Value: "10.0.0.1", TTL: 60, Enabled: true},
+			{Name: "nas.home.lan", Type: TypeA, Value: "10.0.0.2", TTL: 60, Enabled: true},
+			{Name: "www.corp.lan", Type: TypeA, Value: "10.0.1.1", TTL: 60, Enabled: true},
+			{Name: "a.b.corp.lan", Type: TypeA, Value: "10.0.1.2", TTL: 60, Enabled: true},
+			{Name: "*.wild.corp.lan", Type: TypeA, Value: "10.0.1.3", TTL: 60, Enabled: true},
+		})
+	tests := []struct{ name, match string }{
+		{"nas.home.lan", "nas.home.lan"},     // exact single record
+		{"x.y.home.lan", "home.lan"},         // single wildcard: its base
+		{"WWW.Corp.Lan.", "www.corp.lan"},    // exact zone record, normalised
+		{"corp.lan", "corp.lan"},             // apex
+		{"b.corp.lan", "corp.lan"},           // empty non-terminal
+		{"nope.corp.lan", "corp.lan"},        // NXDOMAIN
+		{"x.wild.corp.lan", "wild.corp.lan"}, // zone wildcard: closest encloser
+	}
+	for _, tt := range tests {
+		res := ix.Lookup(tt.name, dns.TypeA)
+		if !res.Found || res.Match != tt.match {
+			t.Errorf("%s: found %v match %q, want %q", tt.name, res.Found, res.Match, tt.match)
+		}
+	}
+	// pass leaves a name (and a CNAME target) to the upstream
+	if res := ix.ResolveFunc("x.y.home.lan", dns.TypeA, func(name, match string) bool { return match == "home.lan" }); res.Found {
+		t.Fatal("ResolveFunc did not pass the name on")
+	}
+	if res := ix.ResolveFunc("nas.home.lan", dns.TypeA, func(name, match string) bool { return match == "home.lan" }); !res.Found {
+		t.Fatal("exact record passed on")
+	}
+}

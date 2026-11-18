@@ -101,7 +101,7 @@ func (s *Server) decide(ctx context.Context, st *state, req *dns.Msg, client net
 
 	// Own zones and records: always active (also while protection is paused), never
 	// filtered, never cached.
-	if res := st.index.Resolve(q.Name, qtype); res.Found {
+	if res := st.local(q.Name, qtype); res.Found {
 		return s.localOutcome(ctx, st, req, res, forward)
 	}
 
@@ -213,7 +213,7 @@ func (s *Server) resolveTrusted(ctx context.Context, st *state, req *dns.Msg, na
 	if depth > records.MaxCNAMEDepth {
 		return chain{}
 	}
-	if res := st.index.Resolve(name, qtype); res.Found {
+	if res := st.local(name, qtype); res.Found {
 		res.Depth += depth
 		if res.Depth > records.MaxCNAMEDepth {
 			return chain{rcode: dns.RcodeServerFailure}

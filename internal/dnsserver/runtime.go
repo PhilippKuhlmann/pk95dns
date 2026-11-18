@@ -18,6 +18,7 @@ type state struct {
 	settings config.Settings
 	router   *upstream.Router
 	index    *records.Index // own zones and records (nil: none)
+	forwards []string       // conditional forwarding domains (normalised)
 
 	allowed    prefixSet
 	disallowed prefixSet
@@ -180,6 +181,7 @@ func compile(rt Runtime) *state {
 		settings:   cfg,
 		router:     rt.Router,
 		index:      rt.Records,
+		forwards:   forwardDomains(cfg.Conditional),
 		allowed:    compilePrefixes(cfg.AllowedClients),
 		disallowed: compilePrefixes(cfg.DisallowedClients),
 		blockMode:  cfg.BlockingMode,
@@ -255,4 +257,41 @@ func parseClientIP(s string) netip.Addr {
 		return netip.Addr{}
 	}
 	return a.Unmap().WithZone("")
+}
+
+func forwardDomains(cs []config.Conditional) []string {
+	out := make([]string, 0, len(cs))
+	for _, c := range cs {
+		if d := records.NormalizeName(c.Domain); d != "" {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// forwarded reports whether a name the own zones and records would answer belongs to a
+// conditional forwarding instead: the more specific one wins. match is what the name
+// matched in the index (records.Result.Match). An own record for exactly this name always
+// wins (a deliberate override); otherwise a forwarding domain that covers the name and lies
+// strictly below the match – below a wildcard's base or below the zone that would answer
+// NXDOMAIN – takes the name. Equal depth keeps the own data.
+func (st *state) forwarded(name, match string) bool {
+	if match == name {
+		return false
+	}
+	for _, d := range st.forwards {
+		if d != match && records.InZone(name, d) && records.InZone(d, match) {
+			return true
+		}
+	}
+	return false
+}
+
+// local resolves name from the own zones and records, leaving names to a more specific
+// conditional forwarding (see forwarded), also for CNAME targets inside the index.
+func (st *state) local(name string, qtype uint16) records.Result {
+	if len(st.forwards) == 0 {
+		return st.index.Resolve(name, qtype)
+	}
+	return st.index.ResolveFunc(name, qtype, st.forwarded)
 }
