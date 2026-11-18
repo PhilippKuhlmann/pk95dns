@@ -30,7 +30,8 @@ oder eigenständig mit eigener Oberfläche.
   gesperrte Dienste, zum Beispiel ein Kinder-Tablet.
 - **Upstreams** verschlüsselt über DNS-over-HTTPS, DNS-over-TLS, DNS-over-QUIC und DoH über HTTP/3, mit
   Lastverteilung, parallel oder der Reihe nach, Ersatz-Upstreams, bedingter Weiterleitung (`fritz.box` an
-  den Router) und privaten PTR-Anfragen an den Router. Zertifikate werden immer geprüft.
+  den Router) und privaten PTR-Anfragen an den Router. Eine spezifischere Weiterleitung gewinnt gegen
+  Platzhalter und Zonen der Elterndomain. Zertifikate werden immer geprüft.
 - **Schutz pausieren** für 1 Minute bis 24 Stunden oder ganz ausschalten.
 - **Abfrageprotokoll** mit Suche und Filtern (gesperrt, erlaubt, umgeschrieben, fehlgeschlagen), Statistik
   über 24 Stunden, 7 und 30 Tage mit Top-Domains, Top-Sperren, Top-Clients und Antwortzeiten.
@@ -130,6 +131,26 @@ systemctl restart systemd-resolved
 
 Andere Kandidaten: `dnsmasq`, ein laufendes AdGuard Home oder Pi-hole. `ss -lunp 'sport = :53'` zeigt, wer
 den Port belegt.
+
+## Eigene DNS-Zonen und bedingte Weiterleitung
+
+Eigene Zonen und Einträge beantwortet PK95 DNS selbst, vor Blocklisten, Cache und Upstreams. Eine bedingte
+Weiterleitung (*Einstellungen → Bedingte Weiterleitung*) schickt eine Domain mit allen Unternamen an einen
+eigenen Server, etwa `fritz.box` an den Router oder die AD-Zone `intern.example.de` an den Domain Controller.
+
+Treffen beide auf einen Namen zu, **gewinnt das Spezifischere**:
+
+| Name | Eigene Daten | Weiterleitung | Antwort kommt von |
+|---|---|---|---|
+| `pc1.intern.example.de` | Platzhalter `*.example.de` | `intern.example.de` | Weiterleitung (tiefer als `example.de`) |
+| `gibtsnicht.intern.example.de` | Zone `example.de` (würde NXDOMAIN sagen) | `intern.example.de` | Weiterleitung: die Zone delegiert diesen Teil |
+| `dc.intern.example.de` | Eintrag genau `dc.intern.example.de` | `intern.example.de` | eigenem Eintrag (bewusst gesetzt) |
+| `pc1.gast.fritz.box` | Platzhalter `*.gast.fritz.box` | `fritz.box` | eigenem Eintrag (tiefer als `fritz.box`) |
+| `pc1.intern.example.de` | Platzhalter `*.intern.example.de` | `intern.example.de` | eigenem Eintrag (gleich tief) |
+| `nas.fritz.box` | – | `fritz.box` | Weiterleitung |
+
+Ein Eintrag für genau den gefragten Namen geht also immer vor. Ein Platzhalter zählt mit seiner Basis
+(`*.example.de` → `example.de`), eine Zone mit ihrem Namen. Das gilt auch für Ziele von eigenen CNAMEs.
 
 ## Regeln
 
