@@ -24,6 +24,7 @@ var geoAnswers = map[string][]string{
 	"private.geo.example.|A": {"private.geo.example. 300 IN A 192.168.1.5"},
 	"unknown.geo.example.|A": {"unknown.geo.example. 300 IN A 9.9.9.9"},
 	"allowed.geo.example.|A": {"allowed.geo.example. 300 IN A 5.255.1.9"},
+	"blocked.geo.example.|A": {"blocked.geo.example. 300 IN A 5.255.1.10"},
 	"cdn.geo.example.|A": {
 		"cdn.geo.example. 300 IN CNAME edge.cdn.example.",
 		"edge.cdn.example. 300 IN A 36.1.1.1",
@@ -36,7 +37,9 @@ func geoEnv(t *testing.T, mode string, countries ...string) *env {
 	if err := db.Load(geotest.Write(t, t.TempDir(), geotest.Nets)); err != nil {
 		t.Fatal(err)
 	}
-	e := newEnv(t, func(s *config.Settings) { s.Geo = config.Geo{Mode: mode, Countries: countries} })
+	e := newEnv(t, func(s *config.Settings) {
+		s.Geo = config.Geo{Mode: mode, Countries: countries, ResolveBlocked: true}
+	})
 	e.srv.deps.Geo = &db
 	return e
 }

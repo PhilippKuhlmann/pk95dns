@@ -418,6 +418,7 @@ func (a *app) run(ctx context.Context, ln net.Listener) error {
 	if !a.cfg.NoGeoDownload {
 		start(func() { a.geoUpd.Run(ctx) })
 	}
+	start(func() { a.dns.RunBlockedGeo(ctx) })
 	start(func() { a.loop(ctx, pauseCheckEvery, a.checkPause) })
 	start(func() { a.loop(ctx, monitorEvery, a.checkUpstreams) })
 	start(func() { a.loop(ctx, sessionPruneEvery, a.pruneSessions) })

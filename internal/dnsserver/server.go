@@ -81,6 +81,7 @@ type Server struct {
 	state   atomic.Pointer[state]
 	limiter *rateLimiter
 	hosts   *hostCache
+	bgeo    *blockedGeo // countries of list-blocked names (background lookup)
 
 	statusMu sync.Mutex
 	status   ListenStatus
@@ -95,7 +96,7 @@ type Server struct {
 // New creates a server. Apply must be called before it answers queries (until then it
 // answers SERVFAIL).
 func New(deps Deps) *Server {
-	return &Server{
+	s := &Server{
 		deps:             deps,
 		limiter:          newRateLimiter(),
 		hosts:            newHostCache(),
@@ -103,6 +104,12 @@ func New(deps Deps) *Server {
 		routerCloseDelay: defaultRouterCloseDelay,
 		listenRetry:      defaultListenRetry,
 	}
+	record := func(time.Time, string) {}
+	if deps.Stats != nil {
+		record = deps.Stats.RecordListBlocked
+	}
+	s.bgeo = newBlockedGeo(s.resolveCountry, record, func() time.Time { return s.now() })
+	return s
 }
 
 // Apply swaps the runtime. The previous Router is closed after 30 seconds (in-flight
@@ -219,6 +226,12 @@ func (s *Server) log(st *state, req *dns.Msg, client netip.Addr, o *outcome, ans
 		ElapsedMS:  elapsed,
 		Cached:     o.cached,
 		Country:    o.country,
+	}
+	// Blocked by a list, custom rule or service: the country of the name comes from the
+	// background lookup (the query log gets it only when it is already known).
+	if withStats && (o.status == statusBlocked || o.status == statusBlockedService) &&
+		(q.Qtype == dns.TypeA || q.Qtype == dns.TypeAAAA || q.Qtype == dns.TypeHTTPS) {
+		entry.Country = s.bgeo.note(entry.Name, now, st.settings.Geo.ResolveBlocked && s.deps.Geo.Available())
 	}
 	ev := stats.Event{
 		TS:        now,

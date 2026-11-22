@@ -13,11 +13,12 @@ import (
 
 // geoOut is the answer of GET/PUT /api/geo.
 type geoOut struct {
-	Mode        string   `json:"mode"`
-	Countries   []string `json:"countries"`
-	Available   bool     `json:"available"`
-	DBDate      string   `json:"db_date"`
-	Attribution string   `json:"attribution"`
+	Mode           string   `json:"mode"`
+	Countries      []string `json:"countries"`
+	ResolveBlocked bool     `json:"resolve_blocked"`
+	Available      bool     `json:"available"`
+	DBDate         string   `json:"db_date"`
+	Attribution    string   `json:"attribution"`
 }
 
 func (a *API) geoOut() geoOut {
@@ -26,7 +27,7 @@ func (a *API) geoOut() geoOut {
 	if countries == nil {
 		countries = []string{}
 	}
-	return geoOut{Mode: g.Mode, Countries: countries, Available: a.d.Geo.Available(),
+	return geoOut{Mode: g.Mode, Countries: countries, ResolveBlocked: g.ResolveBlocked, Available: a.d.Geo.Available(),
 		DBDate: a.d.Geo.Date(), Attribution: geo.Attribution}
 }
 
@@ -38,14 +39,20 @@ func (a *API) handleGeo(w http.ResponseWriter, r *http.Request) {
 // duplicates removed; "allow" needs at least one country (it would block every country).
 func (a *API) handleGeoSave(w http.ResponseWriter, r *http.Request) {
 	var b struct {
-		Mode      *string         `json:"mode"`
-		Countries json.RawMessage `json:"countries"`
+		Mode           *string         `json:"mode"`
+		Countries      json.RawMessage `json:"countries"`
+		ResolveBlocked json.RawMessage `json:"resolve_blocked"`
 	}
 	if !decode(w, r, &b) {
 		return
 	}
 	cur := a.d.Settings().Geo
 	g, fields := cleanGeo(b.Mode, b.Countries, cur)
+	if len(b.ResolveBlocked) > 0 && string(b.ResolveBlocked) != "null" {
+		if err := json.Unmarshal(b.ResolveBlocked, &g.ResolveBlocked); err != nil {
+			fields["resolve_blocked"] = "true oder false erwartet."
+		}
+	}
 	if len(fields) > 0 {
 		writeFields(w, fields)
 		return
@@ -63,7 +70,7 @@ func (a *API) handleGeoSave(w http.ResponseWriter, r *http.Request) {
 // cleanGeo validates a geo setting; missing keys keep the current values.
 func cleanGeo(mode *string, raw json.RawMessage, cur config.Geo) (config.Geo, map[string]string) {
 	fields := map[string]string{}
-	g := config.Geo{Mode: cur.Mode, Countries: append([]string{}, cur.Countries...)}
+	g := config.Geo{Mode: cur.Mode, Countries: append([]string{}, cur.Countries...), ResolveBlocked: cur.ResolveBlocked}
 	if mode != nil {
 		switch *mode {
 		case config.GeoOff, config.GeoBlock, config.GeoAllow:

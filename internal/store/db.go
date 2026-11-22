@@ -31,6 +31,7 @@ var migrations = []migration{
 	execMigration(`ALTER TABLE queries ADD COLUMN country TEXT NOT NULL DEFAULT '';
 		ALTER TABLE stats_hours ADD COLUMN country_blocked INTEGER NOT NULL DEFAULT 0;
 		ALTER TABLE stats_hours ADD COLUMN country_unknown INTEGER NOT NULL DEFAULT 0`), // 4: countries (GeoIP)
+	execMigration(`ALTER TABLE stats_hours ADD COLUMN unknown_blocked INTEGER NOT NULL DEFAULT 0`), // 5: list-blocked names without a known country
 }
 
 func execMigration(ddl string) migration {

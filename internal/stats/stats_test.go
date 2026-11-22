@@ -881,3 +881,58 @@ func TestCountriesStored(t *testing.T) {
 	r2.loc, r2.now = time.UTC, r.now
 	check("store", r2)
 }
+
+// List-blocked queries count in the hour of the original query (the background lookup can
+// be late), countries sort by count + list_blocked, a country with only blocked names has
+// count 0, and unknown_blocked / list_blocked_known add up – from memory and the store.
+func TestListBlockedCountries(t *testing.T) {
+	r, st, _ := newTest(t)
+	r.Record(Event{TS: base, Client: "192.168.1.20", Status: "ok", Countries: []string{"DE"}})
+	r.Record(Event{TS: base, Client: "192.168.1.20", Status: "ok", Countries: []string{"DE"}})
+	earlier := base.Add(-2 * time.Hour)
+	for range 3 {
+		r.RecordListBlocked(earlier, "CN") // only blocked names point to CN
+	}
+	r.RecordListBlocked(base, "DE")
+	r.RecordListBlocked(earlier, "")
+	r.RecordListBlocked(base, "")
+	check := func(label string, r *Recorder) {
+		c, err := r.Countries(24, base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []CountryDetail{
+			{CountryCount: CountryCount{Code: "CN", ListBlocked: 3}},
+			{CountryCount: CountryCount{Code: "DE", Count: 2, ListBlocked: 1}, Clients: 1},
+		}
+		if !slices.Equal(c.Countries, want) || c.UnknownBlocked != 2 {
+			t.Fatalf("%s: %+v unknown_blocked %d", label, c.Countries, c.UnknownBlocked)
+		}
+		s := summary(t, r, 24, base)
+		if s.Totals.UnknownBlocked != 2 || s.Totals.ListBlockedKnown != 4 || len(s.TopCountries) != 2 || s.TopCountries[0].Code != "CN" {
+			t.Fatalf("%s: totals %+v top %+v", label, s.Totals, s.TopCountries)
+		}
+		// the hour of the original query
+		hourOfCN := hourOf(earlier.Unix())
+		var inHour int64
+		for _, p := range s.Series {
+			if p.T == hourOfCN*1000 {
+				inHour = p.Queries
+			}
+		}
+		if inHour != 0 {
+			t.Fatalf("%s: background counts must not add client queries", label)
+		}
+	}
+	check("memory", r)
+	if err := r.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	r2 := New(st)
+	r2.loc, r2.now = time.UTC, r.now
+	check("store", r2)
+	hours, err := st.LoadHours(hourOf(earlier.Unix()), hourOf(earlier.Unix())+hourSec)
+	if err != nil || len(hours) != 1 || hours[0].UnknownBlocked != 1 {
+		t.Fatalf("stored hour of the original query: %+v %v", hours, err)
+	}
+}

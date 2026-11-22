@@ -52,6 +52,9 @@ type CountryCount struct {
 	Count   int64  `json:"count"`
 	Blocked int64  `json:"blocked"`
 	Removed int64  `json:"removed"`
+	// ListBlocked: queries blocked by lists, custom rules or services whose name points to
+	// the country (background lookup, docs/design.md).
+	ListBlocked int64 `json:"list_blocked"`
 }
 
 // CountryDetail adds the distinct clients that got answers in the country.
@@ -65,6 +68,8 @@ type Countries struct {
 	Hours     int             `json:"hours"`
 	Countries []CountryDetail `json:"countries"`
 	Unknown   int64           `json:"unknown"` // public answers without a country in the database
+	// UnknownBlocked: list-blocked queries whose country is not known.
+	UnknownBlocked int64 `json:"unknown_blocked"`
 }
 
 type Totals struct {
@@ -75,9 +80,13 @@ type Totals struct {
 	SafeSearch int64   `json:"safesearch"`
 	Local      int64   `json:"local"` // answers from own zones and records (status rewrite), without SafeSearch
 	// CountryBlocked: answers fully blocked by country (also counted in Blocked).
-	CountryBlocked int64   `json:"country_blocked"`
-	Services       int64   `json:"services"`
-	AvgMS          float64 `json:"avg_ms"`
+	CountryBlocked int64 `json:"country_blocked"`
+	// UnknownBlocked: queries blocked by lists, custom rules or services without a known
+	// country; ListBlockedKnown: those with one (sum of the countries' list_blocked).
+	UnknownBlocked   int64   `json:"unknown_blocked"`
+	ListBlockedKnown int64   `json:"list_blocked_known"`
+	Services         int64   `json:"services"`
+	AvgMS            float64 `json:"avg_ms"`
 }
 
 type Point struct {
@@ -131,18 +140,20 @@ const (
 	kindCountryBlocked = "country_blocked"
 	kindCountryRemoved = "country_removed"
 	kindCountryClient  = "country_client"
+	// kindCountryListBlocked: list-blocked queries per country of their name.
+	kindCountryListBlocked = "country_list_blocked"
 )
 
 var allKinds = []string{kindDomain, kindBlocked, kindClient, kindClientBlocked, kindUpstream,
-	kindCountry, kindCountryBlocked, kindCountryRemoved, kindCountryClient}
+	kindCountry, kindCountryBlocked, kindCountryRemoved, kindCountryClient, kindCountryListBlocked}
 
-var countryKinds = []string{kindCountry, kindCountryBlocked, kindCountryRemoved, kindCountryClient}
+var countryKinds = []string{kindCountry, kindCountryBlocked, kindCountryRemoved, kindCountryClient, kindCountryListBlocked}
 
 // storeLimit is how many keys per kind and hour are saved: all countries (there are only
 // about 250), country/client pairs up to a bound, the top storeTopN of everything else.
 func storeLimit(kind string) int {
 	switch kind {
-	case kindCountry, kindCountryBlocked, kindCountryRemoved:
+	case kindCountry, kindCountryBlocked, kindCountryRemoved, kindCountryListBlocked:
 		return 300
 	case kindCountryClient:
 		return 5000
@@ -627,6 +638,7 @@ func (r *Recorder) Summary(hours int, now time.Time) (Summary, error) {
 		s.Totals.SafeSearch += h.SafeSearch
 		s.Totals.Local += h.Local
 		s.Totals.CountryBlocked += h.CountryBlocked
+		s.Totals.UnknownBlocked += h.UnknownBlocked
 		s.Totals.Services += h.Services
 		elapsed += h.ElapsedMS
 	}
@@ -675,6 +687,9 @@ func (r *Recorder) Summary(hours int, now time.Time) (Summary, error) {
 		}
 		s.TopUpstreams = append(s.TopUpstreams, u)
 	}
+	for _, lb := range c.tops[kindCountryListBlocked] {
+		s.Totals.ListBlockedKnown += lb.count
+	}
 	s.TopCountries = []CountryCount{}
 	for _, d := range countryDetails(c.tops, summaryTopN) {
 		s.TopCountries = append(s.TopCountries, d.CountryCount)
@@ -697,13 +712,31 @@ func countryDetails(tops map[string]map[string]*counter, n int) []CountryDetail 
 		}
 		return 0
 	}
-	out := []CountryDetail{}
-	for _, kc := range ranked(tops[kindCountry], n) {
+	// Countries with answers or with list-blocked names, most of both first: a country can
+	// have count 0 when everything that pointed there was blocked by a list.
+	codes := map[string]bool{}
+	for _, kind := range []string{kindCountry, kindCountryListBlocked} {
+		for code := range tops[kind] {
+			codes[code] = true
+		}
+	}
+	out := make([]CountryDetail, 0, len(codes))
+	for code := range codes {
 		out = append(out, CountryDetail{
-			CountryCount: CountryCount{Code: kc.key, Count: kc.count,
-				Blocked: count(kindCountryBlocked, kc.key), Removed: count(kindCountryRemoved, kc.key)},
-			Clients: clients[kc.key],
+			CountryCount: CountryCount{Code: code, Count: count(kindCountry, code), Blocked: count(kindCountryBlocked, code),
+				Removed: count(kindCountryRemoved, code), ListBlocked: count(kindCountryListBlocked, code)},
+			Clients: clients[code],
 		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i].Count+out[i].ListBlocked, out[j].Count+out[j].ListBlocked
+		if a != b {
+			return a > b
+		}
+		return out[i].Code < out[j].Code
+	})
+	if n > 0 && len(out) > n {
+		out = out[:n]
 	}
 	return out
 }
@@ -728,8 +761,33 @@ func (r *Recorder) Countries(hours int, now time.Time) (Countries, error) {
 	out := Countries{Hours: hours, Countries: countryDetails(c.tops, 0)}
 	for _, h := range c.hours {
 		out.Unknown += h.CountryUnknown
+		out.UnknownBlocked += h.UnknownBlocked
 	}
 	return out, nil
+}
+
+// RecordListBlocked counts a query blocked by a list, custom rule or service in the hour
+// of ts: with the country its name points to, or as unknown_blocked (code ""). Called by
+// the background lookup, possibly long after the query; it is not a client query.
+func (r *Recorder) RecordListBlocked(ts time.Time, code string) {
+	ms := ts.UnixMilli()
+	hour := hourOf(ts.Unix())
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if hour <= r.dropped {
+		hour = r.dropped + hourSec // already saved and gone from memory (see Record)
+	}
+	b := r.buckets[hour]
+	if b == nil {
+		b = newBucket(hour)
+		r.buckets[hour] = b
+	}
+	b.version++
+	if code == "" {
+		b.totals.UnknownBlocked++
+		return
+	}
+	b.add(kindCountryListBlocked, code, 0, ms)
 }
 
 func nameCounts(m map[string]*counter) []NameCount {

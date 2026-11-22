@@ -312,11 +312,15 @@ the home country of the company behind the name.
 ### `GET /api/geo`, `PUT /api/geo`
 
 ```json
-{ "mode": "block", "countries": ["CN", "RU"], "available": true, "db_date": "2026-11-01",
+{ "mode": "block", "countries": ["CN", "RU"], "resolve_blocked": true, "available": true, "db_date": "2026-11-01",
   "attribution": "IP-Geolocation by DB-IP (https://db-ip.com)" }
 ```
 
-`PUT` takes `{"mode", "countries"}` (each optional; missing keys stay) and answers the same shape.
+`PUT` takes `{"mode", "countries", "resolve_blocked"}` (each optional; missing keys stay) and answers the same shape.
+- `resolve_blocked` (1.3.0, default `true`): look up in the background which country the names point to that lists,
+  custom rules or services blocked (see below). The upstream then also sees the blocked names; no connection to the
+  blocked server is ever made. Off: those queries count as `unknown_blocked`. `422 fields.resolve_blocked` for a
+  non-boolean.
 - `mode`: `off` (default), `block` (block the listed countries), `allow` (allow only the listed countries).
 - `countries`: at most 250 known codes; trimmed, upper-cased, duplicates removed. `allow` needs at least one.
 - Errors: `422 fields.mode`, `fields.countries` (not a list, too many, `allow` without countries), `fields.countries.N`.
@@ -340,6 +344,17 @@ All countries of the period (`hours` like `/api/stats`), most answers first:
 
 `clients`: distinct clients with answers in the country. `unknown`: answers with public addresses of which none has a
 country in the database.
+
+**Blocked names (1.3.0):** every country entry (here and in `top_countries`) also has `"list_blocked": n` – queries
+blocked by lists, custom rules or services (A/AAAA/HTTPS) whose name points to the country. `count`, `blocked`
+(country filter) and `removed` keep their meaning. Both lists sort by `count + list_blocked`, so a country can appear
+with `count: 0` when everything there was blocked. `unknown_blocked` (here and in `/api/stats` `totals`) counts the
+list-blocked queries without a known country (resolve_blocked off, no database, no public address, queue full);
+`totals.list_blocked_known` the ones with one. A blocked query is answered at once; its name is looked up in the
+background through the normal upstreams (and the answer cache) – at most 10 names per second, each name at most once
+a day (24 h cache, also for "no country"), a queue of 1000 names (more count as unknown) – and counted in the hour of
+the query. These lookups are never client queries: no query log entry, no client statistics. The query log gets the
+`country` of a blocked entry only when the name's country was already known when it was written.
 
 ## Blocked services
 
