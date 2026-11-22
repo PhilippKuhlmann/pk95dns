@@ -602,6 +602,9 @@ type HourStats struct {
 	// addresses of which none has a country in the database.
 	CountryBlocked int64
 	CountryUnknown int64
+	// UnknownBlocked: queries blocked by lists, custom rules or services whose country is
+	// not known (no lookup, no public address, queue full).
+	UnknownBlocked int64
 	ElapsedMS      float64 // sum over all queries of the hour
 }
 
@@ -624,8 +627,8 @@ func (s *Store) SaveHour(h HourStats, top []TopEntry) error {
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec(`INSERT OR REPLACE INTO stats_hours (hour, queries, blocked, cached, safesearch, services, local,
-		country_blocked, country_unknown, elapsed_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, h.Hour, h.Queries, h.Blocked,
-		h.Cached, h.SafeSearch, h.Services, h.Local, h.CountryBlocked, h.CountryUnknown, h.ElapsedMS); err != nil {
+		country_blocked, country_unknown, unknown_blocked, elapsed_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, h.Hour, h.Queries,
+		h.Blocked, h.Cached, h.SafeSearch, h.Services, h.Local, h.CountryBlocked, h.CountryUnknown, h.UnknownBlocked, h.ElapsedMS); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM stats_top WHERE hour = ?`, h.Hour); err != nil {
@@ -650,7 +653,7 @@ func (s *Store) SaveHour(h HourStats, top []TopEntry) error {
 // LoadHours returns the stored hours with from <= Hour < to, ascending.
 func (s *Store) LoadHours(from, to int64) ([]HourStats, error) {
 	rows, err := s.DB.Query(`SELECT hour, queries, blocked, cached, safesearch, services, local, country_blocked,
-		country_unknown, elapsed_ms FROM stats_hours WHERE hour >= ? AND hour < ? ORDER BY hour`, from, to)
+		country_unknown, unknown_blocked, elapsed_ms FROM stats_hours WHERE hour >= ? AND hour < ? ORDER BY hour`, from, to)
 	if err != nil {
 		return nil, err
 	}
@@ -658,7 +661,7 @@ func (s *Store) LoadHours(from, to int64) ([]HourStats, error) {
 	out := []HourStats{}
 	for rows.Next() {
 		var h HourStats
-		if err := rows.Scan(&h.Hour, &h.Queries, &h.Blocked, &h.Cached, &h.SafeSearch, &h.Services, &h.Local, &h.CountryBlocked, &h.CountryUnknown, &h.ElapsedMS); err != nil {
+		if err := rows.Scan(&h.Hour, &h.Queries, &h.Blocked, &h.Cached, &h.SafeSearch, &h.Services, &h.Local, &h.CountryBlocked, &h.CountryUnknown, &h.UnknownBlocked, &h.ElapsedMS); err != nil {
 			return nil, err
 		}
 		out = append(out, h)

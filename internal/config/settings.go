@@ -78,6 +78,10 @@ type Settings struct {
 type Geo struct {
 	Mode      string   `json:"mode"`
 	Countries []string `json:"countries"` // upper-case ISO-3166 alpha-2 codes (and EU/AP)
+	// ResolveBlocked: look up the country of names blocked by lists, custom rules or
+	// services in the background (the upstream sees those names; no connection to the
+	// blocked server is made). Off: they count as unknown_blocked.
+	ResolveBlocked bool `json:"resolve_blocked"`
 }
 
 // Geo modes.
@@ -143,7 +147,7 @@ func Defaults() Settings {
 		},
 		BlockedServices:   []string{},
 		ProtectionEnabled: true,
-		Geo:               Geo{Mode: GeoOff, Countries: []string{}},
+		Geo:               Geo{Mode: GeoOff, Countries: []string{}, ResolveBlocked: true},
 	}
 }
 

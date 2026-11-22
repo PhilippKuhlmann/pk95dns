@@ -187,7 +187,16 @@ multicast) and own data (zones, records, rewrites, SafeSearch, blocked answers) 
 of the blocking mode, status `blocked_country`, reason `country`. The cache keeps the full upstream answer, so a
 changed setting applies at once.
 
-Statistics per hour: `stats_hours.country_blocked`, `country_unknown` (schema v4) and the top kinds `country`,
+Blocked names (1.3.0, `dnsserver/blockedgeo.go`): a query blocked by a list, custom rule or service (A/AAAA/HTTPS)
+never reaches an upstream, so `Server.log` hands its name to `blockedGeo.note`: a cached country (24 h, also negative)
+is counted at once (`stats.Recorder.RecordListBlocked`, kind `country_list_blocked`, or `stats_hours.unknown_blocked`
+for none) and written to the query log; otherwise the name is queued once (dedupe; the waiting queries per hour are
+remembered) – a full queue (1000 names), `geo.resolve_blocked` off or no database count as unknown at once. The
+worker (`RunBlockedGeo`, started by the app) resolves one name per 100 ms via `resolveUpstream` (cache, router; no
+filtering, log or stats), takes the country of the first public A, else AAAA, address and counts every waiting
+query in its own hour. Client answers never wait for it.
+
+Statistics per hour: `stats_hours.country_blocked`, `country_unknown` (schema v4), `unknown_blocked` (v5) and the top kinds `country`,
 `country_blocked`, `country_removed` (all countries kept per hour) and `country_client` (`code|client`, up to 5000
 per hour) for the distinct clients of `/api/countries`. The query log stores `country`.
 
