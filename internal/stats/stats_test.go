@@ -838,3 +838,46 @@ func TestTotalsLocal(t *testing.T) {
 		t.Fatalf("totals JSON %s %v", raw, err)
 	}
 }
+
+// Country numbers come out the same from memory and, after a flush, from the store; all
+// countries are kept per hour (not only the top storeTopN), and 7/30 days include them.
+func TestCountriesStored(t *testing.T) {
+	r, st, _ := newTest(t)
+	codes := []string{}
+	for i := 0; i < 150; i++ { // more countries than storeTopN
+		codes = append(codes, fmt.Sprintf("C%03d", i))
+	}
+	r.Record(Event{TS: base, Client: "192.168.1.20", Status: "ok", Countries: codes})
+	r.Record(Event{TS: base, Client: "192.168.1.21", Status: "blocked_country", Countries: []string{"RU"}})
+	r.Record(Event{TS: base, Client: "192.168.1.21", Status: "ok", Countries: []string{"DE"}, Removed: map[string]int{"RU": 3}})
+	r.Record(Event{TS: base, Client: "192.168.1.22", Status: "ok", Unknown: true})
+	check := func(label string, r *Recorder) {
+		for _, hours := range []int{24, 168, 720} {
+			c, err := r.Countries(hours, base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(c.Countries) != 152 || c.Unknown != 1 {
+				t.Fatalf("%s %d: %d countries, unknown %d", label, hours, len(c.Countries), c.Unknown)
+			}
+			byCode := map[string]CountryDetail{}
+			for _, d := range c.Countries {
+				byCode[d.Code] = d
+			}
+			if ru := byCode["RU"]; ru.Count != 1 || ru.Blocked != 1 || ru.Removed != 3 || ru.Clients != 1 {
+				t.Errorf("%s %d: RU %+v", label, hours, ru)
+			}
+			s := summary(t, r, hours, base)
+			if s.Totals.CountryBlocked != 1 || s.Totals.Blocked != 1 || len(s.TopCountries) != summaryTopN {
+				t.Errorf("%s %d: totals %+v, %d top countries", label, hours, s.Totals, len(s.TopCountries))
+			}
+		}
+	}
+	check("memory", r)
+	if err := r.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	r2 := New(st)
+	r2.loc, r2.now = time.UTC, r.now
+	check("store", r2)
+}

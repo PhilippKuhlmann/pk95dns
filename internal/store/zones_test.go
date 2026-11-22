@@ -226,7 +226,7 @@ func TestMigrateV2FailureRollsBack(t *testing.T) {
 
 func TestFreshDatabaseIsV2(t *testing.T) {
 	s := openTest(t)
-	if v := userVersion(t, s); v != 3 || v != len(migrations) {
+	if v := userVersion(t, s); v != 4 || v != len(migrations) {
 		t.Fatalf("user_version = %d", v)
 	}
 	if tableExists(t, s, "rewrites") || !tableExists(t, s, "zones") || !tableExists(t, s, "records") {

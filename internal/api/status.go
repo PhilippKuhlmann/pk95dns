@@ -236,7 +236,8 @@ func (a *API) handleStatsReset(w http.ResponseWriter, r *http.Request) {
 var statusGroups = map[string][]string{
 	"all":       nil,
 	"":          nil,
-	"blocked":   {"blocked", "blocked_service"},
+	"blocked":   {"blocked", "blocked_service", "blocked_country"},
+	"country":   {"blocked_country"},
 	"allowed":   {"ok", "allowed"},
 	"rewritten": {"rewrite", "safesearch"},
 	"failed":    {"error", "refused"},

@@ -70,7 +70,22 @@ type Settings struct {
 	BlockedServices       []string `json:"-"`
 	ProtectionEnabled     bool     `json:"-"`
 	ProtectionPausedUntil int64    `json:"-"` // unix ms, 0 = not paused
+	Geo                   Geo      `json:"-"` // country blocking (GET/PUT /api/geo)
 }
+
+// Geo is the country blocking: mode "off", "block" (the listed countries) or "allow" (only
+// the listed countries; addresses without a country are always allowed).
+type Geo struct {
+	Mode      string   `json:"mode"`
+	Countries []string `json:"countries"` // upper-case ISO-3166 alpha-2 codes (and EU/AP)
+}
+
+// Geo modes.
+const (
+	GeoOff   = "off"
+	GeoBlock = "block"
+	GeoAllow = "allow"
+)
 
 // Upstream modes.
 const (
@@ -128,6 +143,7 @@ func Defaults() Settings {
 		},
 		BlockedServices:   []string{},
 		ProtectionEnabled: true,
+		Geo:               Geo{Mode: GeoOff, Countries: []string{}},
 	}
 }
 
@@ -152,6 +168,7 @@ func Merge(base Settings, patch []byte) (Settings, error) {
 	out.BlockedServices = base.BlockedServices
 	out.ProtectionEnabled = base.ProtectionEnabled
 	out.ProtectionPausedUntil = base.ProtectionPausedUntil
+	out.Geo = base.Geo
 	out.normalize()
 	return out, nil
 }
@@ -167,15 +184,19 @@ func (s Settings) Clone() Settings {
 	c.AllowedClients = cloneStrings(s.AllowedClients)
 	c.DisallowedClients = cloneStrings(s.DisallowedClients)
 	c.BlockedServices = cloneStrings(s.BlockedServices)
+	c.Geo.Countries = cloneStrings(s.Geo.Countries)
 	return c
 }
 
 // normalize replaces nil slices by empty ones so the JSON answer has [] instead of null.
 func (s *Settings) normalize() {
-	for _, p := range []*[]string{&s.Upstreams, &s.Fallback, &s.Bootstrap, &s.PrivateUpstreams, &s.AllowedClients, &s.DisallowedClients, &s.BlockedServices} {
+	for _, p := range []*[]string{&s.Upstreams, &s.Fallback, &s.Bootstrap, &s.PrivateUpstreams, &s.AllowedClients, &s.DisallowedClients, &s.BlockedServices, &s.Geo.Countries} {
 		if *p == nil {
 			*p = []string{}
 		}
+	}
+	if s.Geo.Mode == "" {
+		s.Geo.Mode = GeoOff
 	}
 	if s.Conditional == nil {
 		s.Conditional = []Conditional{}

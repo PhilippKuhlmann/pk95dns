@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,12 @@ type Event struct {
 	Upstream  string // "" when not forwarded
 	ElapsedMS float64
 	Cached    bool
+	// Countries of the answer: the distinct codes of its public A/AAAA addresses (before
+	// country blocking removed any), Removed the addresses removed per country from an
+	// otherwise allowed answer, Unknown when it had public addresses but none with a country.
+	Countries []string
+	Removed   map[string]int
+	Unknown   bool
 }
 
 // Summary is the answer of GET /api/stats (client names are filled in by the API).
@@ -35,6 +42,29 @@ type Summary struct {
 	TopBlocked   []NameCount     `json:"top_blocked"`
 	TopClients   []ClientCount   `json:"top_clients"`
 	TopUpstreams []UpstreamCount `json:"top_upstreams"`
+	TopCountries []CountryCount  `json:"top_countries"`
+}
+
+// CountryCount: Count answers with at least one public address in the country, Blocked of
+// those fully blocked by country, Removed addresses removed from otherwise allowed answers.
+type CountryCount struct {
+	Code    string `json:"code"`
+	Count   int64  `json:"count"`
+	Blocked int64  `json:"blocked"`
+	Removed int64  `json:"removed"`
+}
+
+// CountryDetail adds the distinct clients that got answers in the country.
+type CountryDetail struct {
+	CountryCount
+	Clients int `json:"clients"`
+}
+
+// Countries is the answer of GET /api/countries.
+type Countries struct {
+	Hours     int             `json:"hours"`
+	Countries []CountryDetail `json:"countries"`
+	Unknown   int64           `json:"unknown"` // public answers without a country in the database
 }
 
 type Totals struct {
@@ -44,8 +74,10 @@ type Totals struct {
 	Cached     int64   `json:"cached"`
 	SafeSearch int64   `json:"safesearch"`
 	Local      int64   `json:"local"` // answers from own zones and records (status rewrite), without SafeSearch
-	Services   int64   `json:"services"`
-	AvgMS      float64 `json:"avg_ms"`
+	// CountryBlocked: answers fully blocked by country (also counted in Blocked).
+	CountryBlocked int64   `json:"country_blocked"`
+	Services       int64   `json:"services"`
+	AvgMS          float64 `json:"avg_ms"`
 }
 
 type Point struct {
@@ -92,7 +124,41 @@ const (
 	kindUpstream      = "upstream"       // upstream address, Sum = elapsed ms
 )
 
-var allKinds = []string{kindDomain, kindBlocked, kindClient, kindClientBlocked, kindUpstream}
+// Country kinds: answers per country, of those fully blocked, addresses removed, and
+// "code|client" pairs for the distinct clients per country.
+const (
+	kindCountry        = "country"
+	kindCountryBlocked = "country_blocked"
+	kindCountryRemoved = "country_removed"
+	kindCountryClient  = "country_client"
+)
+
+var allKinds = []string{kindDomain, kindBlocked, kindClient, kindClientBlocked, kindUpstream,
+	kindCountry, kindCountryBlocked, kindCountryRemoved, kindCountryClient}
+
+var countryKinds = []string{kindCountry, kindCountryBlocked, kindCountryRemoved, kindCountryClient}
+
+// storeLimit is how many keys per kind and hour are saved: all countries (there are only
+// about 250), country/client pairs up to a bound, the top storeTopN of everything else.
+func storeLimit(kind string) int {
+	switch kind {
+	case kindCountry, kindCountryBlocked, kindCountryRemoved:
+		return 300
+	case kindCountryClient:
+		return 5000
+	}
+	return storeTopN
+}
+
+// loadLimit is how many keys per kind a summary reads from the store (0 = all).
+func loadLimit(kind string) int {
+	for _, k := range countryKinds {
+		if k == kind {
+			return 0
+		}
+	}
+	return storeTopLimit
+}
 
 const (
 	hourSec = int64(3600)
@@ -132,7 +198,11 @@ func newBucket(hour int64) *bucket {
 
 // add counts key into kind; new keys beyond maxKeys are only counted in the totals.
 func (b *bucket) add(kind, key string, sum float64, ms int64) {
-	if key == "" {
+	b.addN(kind, key, 1, sum, ms)
+}
+
+func (b *bucket) addN(kind, key string, n int64, sum float64, ms int64) {
+	if key == "" || n <= 0 {
 		return
 	}
 	m := b.top[kind]
@@ -144,7 +214,7 @@ func (b *bucket) add(kind, key string, sum float64, ms int64) {
 		c = &counter{}
 		m[key] = c
 	}
-	c.count++
+	c.count += n
 	c.sum += sum
 	if ms > c.last {
 		c.last = ms
@@ -199,7 +269,9 @@ func dayStarts(now time.Time, loc *time.Location, n int) []int64 {
 	return out
 }
 
-func isBlocked(status string) bool { return status == "blocked" || status == "blocked_service" }
+func isBlocked(status string) bool {
+	return status == "blocked" || status == "blocked_service" || status == "blocked_country"
+}
 
 // Record counts one query into the current hour.
 func (r *Recorder) Record(e Event) {
@@ -260,6 +332,24 @@ func (r *Recorder) Record(e Event) {
 	}
 	if e.Upstream != "" {
 		b.add(kindUpstream, e.Upstream, e.ElapsedMS, ms)
+	}
+	if e.Status == "blocked_country" {
+		t.CountryBlocked++
+	}
+	if e.Unknown {
+		t.CountryUnknown++
+	}
+	for _, code := range e.Countries {
+		b.add(kindCountry, code, 0, ms)
+		if e.Status == "blocked_country" {
+			b.add(kindCountryBlocked, code, 0, ms)
+		}
+		if e.Client != "" {
+			b.add(kindCountryClient, code+"|"+e.Client, 0, ms)
+		}
+	}
+	for code, n := range e.Removed {
+		b.addN(kindCountryRemoved, code, int64(n), 0, ms)
 	}
 }
 
@@ -329,7 +419,7 @@ func (r *Recorder) Flush() error {
 	now := r.now()
 	var firstErr error
 	for _, s := range snaps {
-		if err := r.st.SaveHour(s.totals, limitTop(s.top, storeTopN)); err != nil {
+		if err := r.st.SaveHour(s.totals, limitTopBy(s.top, storeLimit)); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -353,6 +443,11 @@ func (r *Recorder) Flush() error {
 
 // limitTop keeps the n highest counts per kind.
 func limitTop(entries []store.TopEntry, n int) []store.TopEntry {
+	return limitTopBy(entries, func(string) int { return n })
+}
+
+// limitTopBy keeps the n(kind) highest entries of every kind.
+func limitTopBy(entries []store.TopEntry, n func(kind string) int) []store.TopEntry {
 	sort.Slice(entries, func(i, j int) bool {
 		a, b := entries[i], entries[j]
 		if a.Kind != b.Kind {
@@ -370,7 +465,7 @@ func limitTop(entries []store.TopEntry, n int) []store.TopEntry {
 		if e.Kind != kind {
 			kind, inKind = e.Kind, 0
 		}
-		if inKind < n {
+		if inKind < n(kind) {
 			out = append(out, e)
 		}
 		inKind++
@@ -439,7 +534,7 @@ func (r *Recorder) collect(from, to int64, kinds []string) (collected, error) {
 	for _, kind := range kinds {
 		dst := c.tops[kind]
 		for _, rg := range ranges {
-			entries, err := r.st.LoadTop(kind, rg[0], rg[1], storeTopLimit)
+			entries, err := r.st.LoadTop(kind, rg[0], rg[1], loadLimit(kind))
 			if err != nil {
 				return collected{}, err
 			}
@@ -531,6 +626,7 @@ func (r *Recorder) Summary(hours int, now time.Time) (Summary, error) {
 		s.Totals.Cached += h.Cached
 		s.Totals.SafeSearch += h.SafeSearch
 		s.Totals.Local += h.Local
+		s.Totals.CountryBlocked += h.CountryBlocked
 		s.Totals.Services += h.Services
 		elapsed += h.ElapsedMS
 	}
@@ -579,7 +675,61 @@ func (r *Recorder) Summary(hours int, now time.Time) (Summary, error) {
 		}
 		s.TopUpstreams = append(s.TopUpstreams, u)
 	}
+	s.TopCountries = []CountryCount{}
+	for _, d := range countryDetails(c.tops, summaryTopN) {
+		s.TopCountries = append(s.TopCountries, d.CountryCount)
+	}
 	return s, nil
+}
+
+// countryDetails builds the per-country numbers from the collected tops, most answers
+// first (n <= 0: all).
+func countryDetails(tops map[string]map[string]*counter, n int) []CountryDetail {
+	clients := map[string]int{}
+	for key := range tops[kindCountryClient] {
+		if code, _, ok := strings.Cut(key, "|"); ok {
+			clients[code]++
+		}
+	}
+	count := func(kind, code string) int64 {
+		if c := tops[kind][code]; c != nil {
+			return c.count
+		}
+		return 0
+	}
+	out := []CountryDetail{}
+	for _, kc := range ranked(tops[kindCountry], n) {
+		out = append(out, CountryDetail{
+			CountryCount: CountryCount{Code: kc.key, Count: kc.count,
+				Blocked: count(kindCountryBlocked, kc.key), Removed: count(kindCountryRemoved, kc.key)},
+			Clients: clients[kc.key],
+		})
+	}
+	return out
+}
+
+// Countries returns all countries of the last hours (24, 168 or 720; others → 24; the same
+// window as Summary) with their distinct clients, and the public answers without a country.
+func (r *Recorder) Countries(hours int, now time.Time) (Countries, error) {
+	switch hours {
+	case 24, 168, 720:
+	default:
+		hours = 24
+	}
+	cur := hourOf(now.Unix())
+	from := cur - int64(hours-1)*hourSec
+	if hours == 720 {
+		from = hourOf(dayStarts(now, r.loc, 30)[0] + hourSec - 1)
+	}
+	c, err := r.collect(from, cur+hourSec, countryKinds)
+	if err != nil {
+		return Countries{}, err
+	}
+	out := Countries{Hours: hours, Countries: countryDetails(c.tops, 0)}
+	for _, h := range c.hours {
+		out.Unknown += h.CountryUnknown
+	}
+	return out, nil
 }
 
 func nameCounts(m map[string]*counter) []NameCount {

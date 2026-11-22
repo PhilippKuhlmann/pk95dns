@@ -32,6 +32,10 @@ oder eigenständig mit eigener Oberfläche.
   Lastverteilung, parallel oder der Reihe nach, Ersatz-Upstreams, bedingter Weiterleitung (`fritz.box` an
   den Router) und privaten PTR-Anfragen an den Router. Eine spezifischere Weiterleitung gewinnt gegen
   Platzhalter und Zonen der Elterndomain. Zertifikate werden immer geprüft.
+- **Länder:** Statistik, mit welchen Ländern das Netz spricht, und Ländersperre („diese Länder sperren“ oder
+  „nur diese Länder erlauben“). Grundlage ist die Länder-Datenbank DB-IP Country Lite, die monatlich geladen
+  wird. Das Land ist der Standort des antwortenden Servers: Bei CDNs und Anycast ist das oft ein Knoten in der
+  Nähe, nicht das Heimatland des Anbieters. Erlaubnisregeln und eigene Einträge gehen immer vor.
 - **Schutz pausieren** für 1 Minute bis 24 Stunden oder ganz ausschalten.
 - **Abfrageprotokoll** mit Suche und Filtern (gesperrt, erlaubt, umgeschrieben, fehlgeschlagen), Statistik
   über 24 Stunden, 7 und 30 Tage mit Top-Domains, Top-Sperren, Top-Clients und Antwortzeiten.
@@ -99,6 +103,7 @@ setzen (mindestens 12 Zeichen). Danach die IP des Servers im Router als DNS-Serv
 | `PK95DNS_DNS_LISTEN` | `:53` | DNS über UDP und TCP |
 | `PK95DNS_DATA_DIR` | `/var/lib/pk95dns` | Datenbank `pk95dns.db`, Listenkopien `lists/`, Startpasswort |
 | `TZ` | – | Zeitzone für das Log und die Tagesbalken der 30-Tage-Statistik (Mitternacht bis Mitternacht Ortszeit) |
+| `PK95DNS_GEOIP` | – | `off`: keine Länder-Datenbank laden (keine Länderstatistik, keine Ländersperre) |
 
 Die Oberfläche läuft nur über HTTP. Port 8053 deshalb nicht ins Internet freigeben, von außen per VPN
 oder SSH-Tunnel (`ssh -L 8053:127.0.0.1:8053 root@server`) oder hinter einem Reverse Proxy mit TLS.
@@ -215,3 +220,9 @@ Das Startpasswort steht dann in `./data/initial-admin-password`. Core-Modus zum 
 
 Das Image baut GitHub Actions (`.github/workflows/image.yml`) für `linux/amd64` und `linux/arm64`; ein Tag
 `v1.2.3` setzt die Version, die Core prüft.
+
+## Lizenzen der Daten
+
+Die Länderzuordnung nutzt die Datenbank „IP to Country Lite“ von DB-IP, Lizenz
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/): **IP-Geolocation by [DB-IP](https://db-ip.com)**.
+PK95 DNS lädt sie monatlich nach `<Datenordner>/geoip/` und zeigt den Hinweis in `GET /api/geo` (`attribution`).

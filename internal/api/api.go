@@ -19,6 +19,7 @@ import (
 	"pk95dns/internal/config"
 	"pk95dns/internal/dnsserver"
 	"pk95dns/internal/filter"
+	"pk95dns/internal/geo"
 	"pk95dns/internal/lists"
 	"pk95dns/internal/querylog"
 	"pk95dns/internal/stats"
@@ -42,6 +43,7 @@ type Deps struct {
 	Stats    *stats.Recorder
 	QueryLog *querylog.Writer
 	Cache    *cache.Cache
+	Geo      *geo.DB // country database (nil or empty: not available)
 
 	// Settings returns the current settings (including the json:"-" fields).
 	Settings func() config.Settings
@@ -173,6 +175,9 @@ func (a *API) routes() {
 	// Services.
 	m.HandleFunc("GET /api/services", a.handleServices)
 	m.HandleFunc("PUT /api/services", a.handleServicesSave)
+	m.HandleFunc("GET /api/geo", a.handleGeo)
+	m.HandleFunc("PUT /api/geo", a.handleGeoSave)
+	m.HandleFunc("GET /api/countries", a.handleCountries)
 
 	// Clients.
 	m.HandleFunc("GET /api/clients", a.handleClients)

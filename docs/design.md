@@ -172,6 +172,25 @@ Instagram, Facebook, WhatsApp, X (Twitter), Snapchat, Pinterest, Reddit, LinkedI
 Signal, Netflix, Twitch, Disney+, Prime Video, Spotify, Steam, Epic Games, Roblox, Minecraft, PlayStation
 Network, Xbox Live, Amazon, eBay, Temu, AliExpress, ChatGPT, Tinder, 9GAG, VK.
 
+## Countries (geo package, 1.2.0)
+
+`internal/geo` loads the DB-IP Country Lite database (mmdb, CC BY 4.0) from `<data>/geoip/dbip-country-lite.mmdb` and
+keeps it current like PK95 Proxy: due when missing or older than 32 days, at most one attempt per 6 hours, the current
+month is tried first, then the previous one (published during the first days of a month); a download is checked before
+it replaces the file, a broken one never replaces a good one. `PK95DNS_GEOIP=off` disables it. Lookups are lock-free
+(atomic swap, the old reader is closed a minute later).
+
+Countries come from the A/AAAA addresses of the final upstream or cache answer (pipeline after the CNAME cloaking
+check, `dnsserver.applyGeo`): non-public addresses (RFC 1918, CGNAT, loopback, link-local, ULA, documentation,
+multicast) and own data (zones, records, rewrites, SafeSearch, blocked answers) have none. With `geo.mode` `block` /
+`allow` and filtering active and no allow rule, addresses of blocked countries are removed; none left → blocked answer
+of the blocking mode, status `blocked_country`, reason `country`. The cache keeps the full upstream answer, so a
+changed setting applies at once.
+
+Statistics per hour: `stats_hours.country_blocked`, `country_unknown` (schema v4) and the top kinds `country`,
+`country_blocked`, `country_removed` (all countries kept per hour) and `country_client` (`code|client`, up to 5000
+per hour) for the distinct clients of `/api/countries`. The query log stores `country`.
+
 ## Upstreams (upstream package)
 
 Address forms: see `docs/api.md` → Settings. Transports (`Spec.Protocol()` label in brackets):
@@ -293,6 +312,7 @@ again), `dns.listen_failed` (critical), `dns.listen_ok` (info). Buffered and ret
     { "key": "rules", "label": "Eigene Regeln", "icon": "pencil" },
     { "key": "records", "label": "DNS-Einträge", "icon": "link" },
     { "key": "services", "label": "Dienste", "icon": "lock" },
+    { "key": "countries", "label": "Länder", "icon": "globe" },
     { "key": "clients", "label": "Clients", "icon": "user" },
     { "key": "settings", "label": "Einstellungen", "icon": "cog" }
   ],

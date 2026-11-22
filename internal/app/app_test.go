@@ -335,6 +335,8 @@ func testConfig(t *testing.T, core bool) Config {
 		CoreMode:  core,
 		CoreURL:   "http://127.0.0.1:1",
 		CoreToken: strings.Repeat("t", 48),
+		// no download of the country database from the internet
+		NoGeoDownload: true,
 	}
 }
 

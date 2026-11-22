@@ -28,6 +28,9 @@ var migrations = []migration{
 	execMigration(schemaV1), // 1: initial schema
 	migrateV2,               // 2: zones and records replace rewrites
 	execMigration(`ALTER TABLE stats_hours ADD COLUMN local INTEGER NOT NULL DEFAULT 0`), // 3: answers from own zones and records per hour
+	execMigration(`ALTER TABLE queries ADD COLUMN country TEXT NOT NULL DEFAULT '';
+		ALTER TABLE stats_hours ADD COLUMN country_blocked INTEGER NOT NULL DEFAULT 0;
+		ALTER TABLE stats_hours ADD COLUMN country_unknown INTEGER NOT NULL DEFAULT 0`), // 4: countries (GeoIP)
 }
 
 func execMigration(ddl string) migration {
