@@ -50,7 +50,7 @@ func TestHealthManifestBackup(t *testing.T) {
 		Menu: []MenuItem{
 			{"overview", "Übersicht", "home"}, {"log", "Abfragen", "list"}, {"lists", "Blocklisten", "shield"},
 			{"rules", "Eigene Regeln", "pencil"}, {"records", "DNS-Einträge", "link"}, {"services", "Dienste", "lock"},
-			{"clients", "Clients", "user"}, {"settings", "Einstellungen", "cog"},
+			{"countries", "Länder", "globe"}, {"clients", "Clients", "user"}, {"settings", "Einstellungen", "cog"},
 		},
 		Capabilities: []string{"events", "backup"},
 		Events:       []string{"upstream.down", "upstream.up", "lists.update_failed", "dns.listen_failed", "dns.listen_ok"},

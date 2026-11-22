@@ -312,6 +312,7 @@ again), `dns.listen_failed` (critical), `dns.listen_ok` (info). Buffered and ret
     { "key": "rules", "label": "Eigene Regeln", "icon": "pencil" },
     { "key": "records", "label": "DNS-Einträge", "icon": "link" },
     { "key": "services", "label": "Dienste", "icon": "lock" },
+    { "key": "countries", "label": "Länder", "icon": "globe" },
     { "key": "clients", "label": "Clients", "icon": "user" },
     { "key": "settings", "label": "Einstellungen", "icon": "cog" }
   ],

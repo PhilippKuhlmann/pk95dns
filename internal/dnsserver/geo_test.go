@@ -141,3 +141,18 @@ func TestGeoWithoutDatabase(t *testing.T) {
 		checkGeo(t, e, "ru.geo.example", dns.TypeA, geoWant{status: "ok", answer: []string{"A 5.255.1.1", "A 5.255.1.2"}})
 	}
 }
+
+// "Erlauben" in the query log (POST /api/rules/quick allow) adds "@@||name^" to the custom
+// rules: a name blocked by country must then really get its addresses, also from the cache.
+func TestGeoQuickAllowLetsThrough(t *testing.T) {
+	e := geoEnv(t, config.GeoBlock, "RU")
+	checkGeo(t, e, "ru.geo.example", dns.TypeA, geoWant{status: "blocked_country", reason: "country", country: "RU",
+		answer: []string{"A 0.0.0.0"}, countries: []string{"RU"}})
+	custom, _ := filter.Compile([]filter.Source{{ID: 0, Data: []byte("@@||ru.geo.example^")}})
+	e.engine.SetCustom(custom)
+	checkGeo(t, e, "ru.geo.example", dns.TypeA, geoWant{status: "allowed", reason: "custom", country: "RU",
+		answer: []string{"A 5.255.1.1", "A 5.255.1.2"}, countries: []string{"RU"}})
+	if e.up.count("ru.geo.example", dns.TypeA) != 1 {
+		t.Fatal("the allowed answer did not come from the cache")
+	}
+}

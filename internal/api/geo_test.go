@@ -143,3 +143,18 @@ func TestQuerylogCountry(t *testing.T) {
 		t.Errorf("all: %v", got)
 	}
 }
+
+// Core shows the page "Länder" from the manifest menu, after "Dienste".
+func TestManifestCountriesMenu(t *testing.T) {
+	var keys []string
+	for _, m := range ManifestFor("1.2.0").Menu {
+		keys = append(keys, m.Key)
+	}
+	i := slices.Index(keys, "countries")
+	if i < 1 || keys[i-1] != "services" {
+		t.Fatalf("menu %v", keys)
+	}
+	if m := ManifestFor("1.2.0").Menu[i]; m.Label != "Länder" || m.Icon != "globe" {
+		t.Fatalf("entry %+v", m)
+	}
+}
