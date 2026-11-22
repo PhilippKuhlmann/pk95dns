@@ -107,6 +107,22 @@ clients that do not know it can ignore it, hours recorded by older versions are 
 sum of the points. Top lists have at most 20 entries. `name` of a client
 is the configured client name, else its reverse-DNS host name, else `""`.
 
+**Allowed | blocked lists (1.4.0, additive, at most 20 each, same `hours` windows).** "Blocked" means status
+`blocked`, `blocked_service` or `blocked_country` (as `totals.blocked`); "allowed" is every other status (as
+`totals.queries − totals.blocked`).
+- `top_allowed`: `[{"name","count"}]` – names by allowed queries. Counted per hour from 1.4.0 on (hours of older
+  versions contribute nothing); stored like `top_blocked` (the 100 biggest names per hour), so both lists are equally
+  exact – exact unless a name falls out of an hour's top 100.
+- `top_clients_allowed`: `[{"ip","name","count","blocked"}]` sorted by allowed queries (`count − blocked`), only
+  clients with allowed > 0; `top_clients_blocked`: same shape sorted by `blocked`, only `blocked > 0`. `count` is the
+  total as in `top_clients`. Computed from all clients of the period (stored top 100 per hour), not from the 20 listed.
+- `top_countries_allowed`: `[{"code","count","list_blocked","blocked","removed"}]` sorted by allowed answers
+  `count − blocked` (`count` includes the answers the country filter then blocked completely), only those > 0 – a
+  country whose answers were all blocked appears only in the blocked list;
+  `top_countries_blocked`: same shape sorted by `list_blocked + blocked`, only those > 0. From all countries (stored
+  completely per hour).
+- Empty lists are `[]`.
+
 ### `DELETE /api/stats` → `204` (resets all statistics)
 
 ## Query log
