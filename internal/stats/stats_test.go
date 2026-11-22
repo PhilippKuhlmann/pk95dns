@@ -1008,8 +1008,14 @@ func TestSplitTops(t *testing.T) {
 		}
 		return out
 	}
-	if got := codes(s.TopCountriesAllowed); !slices.Equal(got, []string{"DE", "FR", "US", "RU"}) {
-		t.Fatalf("top_countries_allowed %v", got) // RU has count 3 (answers), all blocked by country
+	// RU: blocked == count (every answer blocked by the country filter) → only in the blocked list
+	if got := codes(s.TopCountriesAllowed); !slices.Equal(got, []string{"DE", "FR", "US"}) {
+		t.Fatalf("top_countries_allowed %v", got)
+	}
+	for _, c := range s.TopCountriesBlocked {
+		if c.Code == "RU" && (c.Count != 3 || c.Blocked != 3) {
+			t.Fatalf("RU %+v", c)
+		}
 	}
 	if got := codes(s.TopCountriesBlocked); !slices.Equal(got, []string{"RU", "CN"}) {
 		t.Fatalf("top_countries_blocked %v", got)

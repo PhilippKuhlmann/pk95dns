@@ -116,8 +116,9 @@ is the configured client name, else its reverse-DNS host name, else `""`.
 - `top_clients_allowed`: `[{"ip","name","count","blocked"}]` sorted by allowed queries (`count − blocked`), only
   clients with allowed > 0; `top_clients_blocked`: same shape sorted by `blocked`, only `blocked > 0`. `count` is the
   total as in `top_clients`. Computed from all clients of the period (stored top 100 per hour), not from the 20 listed.
-- `top_countries_allowed`: `[{"code","count","list_blocked","blocked","removed"}]` sorted by `count`, only `count > 0`
-  (`count` includes answers later fully blocked by the country filter, as everywhere);
+- `top_countries_allowed`: `[{"code","count","list_blocked","blocked","removed"}]` sorted by allowed answers
+  `count − blocked` (`count` includes the answers the country filter then blocked completely), only those > 0 – a
+  country whose answers were all blocked appears only in the blocked list;
   `top_countries_blocked`: same shape sorted by `list_blocked + blocked`, only those > 0. From all countries (stored
   completely per hour).
 - Empty lists are `[]`.

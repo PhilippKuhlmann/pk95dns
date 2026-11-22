@@ -49,7 +49,7 @@ type Summary struct {
 	TopAllowed          []NameCount    `json:"top_allowed"`
 	TopClientsAllowed   []ClientCount  `json:"top_clients_allowed"`   // by count - blocked
 	TopClientsBlocked   []ClientCount  `json:"top_clients_blocked"`   // by blocked, blocked > 0
-	TopCountriesAllowed []CountryCount `json:"top_countries_allowed"` // by count, count > 0
+	TopCountriesAllowed []CountryCount `json:"top_countries_allowed"` // by count - blocked, > 0
 	TopCountriesBlocked []CountryCount `json:"top_countries_blocked"` // by list_blocked + blocked, > 0
 }
 
@@ -745,16 +745,18 @@ func (s *Summary) splitTops(tops map[string]map[string]*counter) {
 	}
 
 	countries := countryDetails(tops, 0)
+	// allowed = answers minus those the country filter blocked completely
 	byCount := slices.Clone(countries)
 	sort.SliceStable(byCount, func(i, j int) bool {
-		if byCount[i].Count != byCount[j].Count {
-			return byCount[i].Count > byCount[j].Count
+		a, b := byCount[i].Count-byCount[i].Blocked, byCount[j].Count-byCount[j].Blocked
+		if a != b {
+			return a > b
 		}
 		return byCount[i].Code < byCount[j].Code
 	})
 	s.TopCountriesAllowed = []CountryCount{}
 	for _, d := range byCount {
-		if d.Count > 0 && len(s.TopCountriesAllowed) < summaryTopN {
+		if d.Count-d.Blocked > 0 && len(s.TopCountriesAllowed) < summaryTopN {
 			s.TopCountriesAllowed = append(s.TopCountriesAllowed, d.CountryCount)
 		}
 	}
