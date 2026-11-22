@@ -17,8 +17,10 @@ import (
 type state struct {
 	settings config.Settings
 	router   *upstream.Router
-	index    *records.Index // own zones and records (nil: none)
-	forwards []string       // conditional forwarding domains (normalised)
+	index    *records.Index  // own zones and records (nil: none)
+	forwards []string        // conditional forwarding domains (normalised)
+	geoMode  string          // config.GeoOff, GeoBlock or GeoAllow
+	geoSet   map[string]bool // countries of the geo setting
 
 	allowed    prefixSet
 	disallowed prefixSet
@@ -182,6 +184,8 @@ func compile(rt Runtime) *state {
 		router:     rt.Router,
 		index:      rt.Records,
 		forwards:   forwardDomains(cfg.Conditional),
+		geoMode:    cfg.Geo.Mode,
+		geoSet:     geoSet(cfg.Geo.Countries),
 		allowed:    compilePrefixes(cfg.AllowedClients),
 		disallowed: compilePrefixes(cfg.DisallowedClients),
 		blockMode:  cfg.BlockingMode,
@@ -294,4 +298,27 @@ func (st *state) local(name string, qtype uint16) records.Result {
 		return st.index.Resolve(name, qtype)
 	}
 	return st.index.ResolveFunc(name, qtype, st.forwarded)
+}
+
+func geoSet(codes []string) map[string]bool {
+	m := make(map[string]bool, len(codes))
+	for _, c := range codes {
+		m[c] = true
+	}
+	return m
+}
+
+// geoBlocked reports whether an address of country code is blocked by the geo setting.
+// Addresses without a country (private, unknown) are never blocked.
+func (st *state) geoBlocked(code string) bool {
+	if code == "" {
+		return false
+	}
+	switch st.geoMode {
+	case config.GeoBlock:
+		return st.geoSet[code]
+	case config.GeoAllow:
+		return !st.geoSet[code]
+	}
+	return false
 }

@@ -385,6 +385,7 @@ const STATUS = {
   allowed: ["Erlaubt", "good"],
   blocked: ["Blockiert", "bad"],
   blocked_service: ["Dienst blockiert", "bad"],
+  blocked_country: ["Land blockiert", "bad"],
   safesearch: ["SafeSearch", "info"],
   rewrite: ["Umgeschrieben", "info"],
   refused: ["Abgewiesen", "warn"],
@@ -1087,7 +1088,7 @@ VIEWS.overview = function viewOverview(root, params, ctx) {
 
 // --- Abfragen (query log) --------------------------------------------------
 
-const LOG_STATUS = [["all", "Alle Status"], ["blocked", "Blockiert"], ["allowed", "Erlaubt"], ["rewritten", "Umgeschrieben"], ["failed", "Fehler und abgewiesen"]];
+const LOG_STATUS = [["all", "Alle Status"], ["blocked", "Blockiert"], ["country", "Land blockiert"], ["allowed", "Erlaubt"], ["rewritten", "Umgeschrieben"], ["failed", "Fehler und abgewiesen"]];
 
 // Sends a quick block/allow rule for exactly this domain and reports the result.
 // Names the API accepts for quick rules (filter.ValidDomain): root queries ("") and names
@@ -1220,7 +1221,7 @@ VIEWS.log = function viewLog(root, params, ctx) {
   }
 
   function row(x, fresh) {
-    const blocked = x.status === "blocked" || x.status === "blocked_service";
+    const blocked = x.status === "blocked" || x.status === "blocked_service" || x.status === "blocked_country";
     const detail = decisionDetail(x, catalog);
     const action = !QUICKABLE.test(x.name || "") || isOwnAnswer(x) ? null : blocked
       ? h("button", { type: "button", class: "small", "aria-label": `${x.name} freigeben`, title: `${x.name} freigeben (eigene Regel @@||${x.name}^)`, onclick: (e) => quick(e.currentTarget, x.name, "allow") }, "Freigeben")

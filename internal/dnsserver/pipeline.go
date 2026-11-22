@@ -20,6 +20,7 @@ import (
 const (
 	statusOK             = "ok"
 	statusAllowed        = "allowed"
+	statusBlockedCountry = "blocked_country"
 	statusBlocked        = "blocked"
 	statusBlockedService = "blocked_service"
 	statusSafeSearch     = "safesearch"
@@ -58,6 +59,11 @@ type outcome struct {
 	authoritative bool
 	drop          bool // rate limited: no answer
 	logDrop       bool // log the dropped query
+	// countries of an upstream or cache answer (see applyGeo)
+	country        string         // first public answer address, or the blocked country
+	countries      []string       // distinct countries of its public addresses
+	removed        map[string]int // addresses removed by country blocking
+	unknownCountry bool           // public addresses, none with a country
 }
 
 // cacheGenKey carries the cache generation of a query (Cache.Gen, read before its state).
@@ -155,7 +161,7 @@ func (s *Server) decide(ctx context.Context, st *state, req *dns.Msg, client net
 		}
 	}
 	o.resp = resp
-	return o
+	return s.applyGeo(st, req, o, filtering)
 }
 
 func upstreamFailure(req *dns.Msg) outcome {

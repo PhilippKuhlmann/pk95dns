@@ -180,6 +180,10 @@ func (u *testUpstream) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 	switch {
+	case geoAnswers[key] != nil: // answers with public addresses (geo_test.go)
+		for _, r := range geoAnswers[key] {
+			resp.Answer = append(resp.Answer, mustRR(r))
+		}
 	case name == "servfail.example.":
 		resp.Rcode = dns.RcodeServerFailure
 	case name == "nx.example.":

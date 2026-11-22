@@ -24,6 +24,8 @@ func main() {
 		CoreMode:  os.Getenv("PK95_CORE_MODE") == "1",
 		CoreURL:   os.Getenv("PK95_CORE_URL"),
 		CoreToken: os.Getenv("PK95_CORE_TOKEN"),
+		// PK95DNS_GEOIP=off: no country database (no download, no country statistics or blocking)
+		NoGeoDownload: os.Getenv("PK95DNS_GEOIP") == "off",
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

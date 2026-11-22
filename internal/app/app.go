@@ -21,6 +21,7 @@ import (
 	"pk95dns/internal/config"
 	"pk95dns/internal/dnsserver"
 	"pk95dns/internal/filter"
+	"pk95dns/internal/geo"
 	"pk95dns/internal/lists"
 	"pk95dns/internal/querylog"
 	"pk95dns/internal/records"
@@ -38,6 +39,9 @@ type Config struct {
 	CoreMode  bool
 	CoreURL   string
 	CoreToken string
+	// NoGeoDownload: do not download the country database (PK95DNS_GEOIP=off; tests).
+	// An existing file is not loaded either; countries then stay unavailable.
+	NoGeoDownload bool
 }
 
 // Timing of the background loops.
@@ -80,6 +84,8 @@ type app struct {
 	cache   *cache.Cache
 	qlog    *querylog.Writer
 	stats   *stats.Recorder
+	geo     *geo.DB      // DB-IP country database (empty until loaded)
+	geoUpd  *geo.Updater // keeps <data>/geoip/dbip-country-lite.mmdb current
 	dns     *dnsserver.Server
 	events  *eventSender // nil in standalone mode
 	started time.Time
@@ -179,11 +185,18 @@ func (a *app) init() error {
 	a.cache = cache.New(s.CacheSize, s.CacheMinTTL, s.CacheMaxTTL)
 	a.qlog = querylog.NewWriter(a.st)
 	a.stats = stats.New(a.st)
+	a.geo = &geo.DB{}
+	a.geoUpd = &geo.Updater{
+		DB:        a.geo,
+		Path:      filepath.Join(cfg.DataDir, "geoip", "dbip-country-lite.mmdb"),
+		UserAgent: "PK95-DNS/" + cfg.Version,
+	}
 	a.dns = dnsserver.New(dnsserver.Deps{
 		Filter:   a.eng,
 		Cache:    a.cache,
 		Log:      a.qlog,
 		Stats:    a.stats,
+		Geo:      a.geo,
 		OnListen: a.onListen,
 	})
 
@@ -355,6 +368,7 @@ func (a *app) handler() http.Handler {
 		Stats:          a.stats,
 		QueryLog:       a.qlog,
 		Cache:          a.cache,
+		Geo:            a.geo,
 		Settings:       a.currentSettings,
 		UpdateSettings: a.updateSettings,
 		Reload:         a.reload,
@@ -401,6 +415,9 @@ func (a *app) run(ctx context.Context, ln net.Listener) error {
 	startOn(&flushWG, func() { a.qlog.Run(flushCtx, a.currentSettings) })
 	startOn(&flushWG, func() { a.stats.Run(flushCtx, a.currentSettings) })
 	start(func() { a.lists.Run(ctx, a.currentSettings) })
+	if !a.cfg.NoGeoDownload {
+		start(func() { a.geoUpd.Run(ctx) })
+	}
 	start(func() { a.loop(ctx, pauseCheckEvery, a.checkPause) })
 	start(func() { a.loop(ctx, monitorEvery, a.checkUpstreams) })
 	start(func() { a.loop(ctx, sessionPruneEvery, a.pruneSessions) })

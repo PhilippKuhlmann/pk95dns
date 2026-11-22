@@ -94,7 +94,11 @@ half-hour offset a day starts with the first full hour after local midnight.
 }
 ```
 
-`blocked` counts statuses `blocked` and `blocked_service`. `local` (new in 1.1.4, additive) counts answers with
+`blocked` counts statuses `blocked`, `blocked_service` and `blocked_country`. `country_blocked` (1.2.0) counts
+answers fully blocked by country. `top_countries` (1.2.0, at most 20, most answers first):
+`[{"code": "DE", "count": 8123, "blocked": 0, "removed": 0}]` – `count` answers with at least one public address in
+the country, `blocked` of those fully blocked, `removed` addresses removed from otherwise allowed answers. Hours
+stored by older versions count 0. `DELETE /api/stats` also clears the country numbers. `local` (new in 1.1.4, additive) counts answers with
 status `rewrite`: own zones and records (including their NXDOMAIN/NODATA) and hosts rules with an address; SafeSearch
 answers have their own status and are only in `safesearch`. Hours stored by older versions count 0. `cached` counts answers from the cache that were not
 blocked (a cache hit can still be blocked by the CNAME check), in `totals` and per point; per point
@@ -111,8 +115,8 @@ is the configured client name, else its reverse-DNS host name, else `""`.
 
 - `limit` 1–500 (default 50); `before`: only entries with `id < before` (paging, newest first).
 - `search`: substring of the domain (case-insensitive). `client`: exact IP or client name.
-- `status`: `all`, `blocked` (`blocked`, `blocked_service`), `allowed` (`ok`, `allowed`), `rewritten`
-  (`rewrite`, `safesearch`), `failed` (`error`, `refused`).
+- `status`: `all`, `blocked` (`blocked`, `blocked_service`, `blocked_country`), `country` (`blocked_country`),
+  `allowed` (`ok`, `allowed`), `rewritten` (`rewrite`, `safesearch`), `failed` (`error`, `refused`).
 
 ```json
 {
@@ -124,7 +128,7 @@ is the configured client name, else its reverse-DNS host name, else `""`.
       "status": "blocked", "reason": "list", "rule": "||ads.example.net^",
       "list_id": 1, "list_name": "AdGuard DNS filter", "service": "",
       "upstream": "", "rcode": "NOERROR", "answer": "0.0.0.0",
-      "elapsed_ms": 0.12, "cached": false
+      "elapsed_ms": 0.12, "cached": false, "country": ""
     }
   ],
   "next_before": 99762
@@ -139,12 +143,16 @@ Status vocabulary (also used by `/api/check`):
 | `allowed` | an allow rule (`@@…` or allow list) matched, then forwarded |
 | `blocked` | block rule (custom rules or a block list) |
 | `blocked_service` | a blocked service (`service` = service id) |
+| `blocked_country` | every address of the upstream/cache answer is in a blocked country (`country` = that country), answered like a normal block |
 | `safesearch` | rewritten to the SafeSearch host |
 | `rewrite` | own DNS record or zone answer (reason `record`/`zone`, also NXDOMAIN/NODATA of a zone, REFUSED for AXFR/IXFR and SERVFAIL for a local CNAME loop), or a hosts rule with an address (`rule`) |
 | `refused` | client not allowed, ANY refused, or rate limit |
 | `error` | all upstreams failed (SERVFAIL) |
 
-`reason`: `list`, `custom`, `service`, `safesearch`, `record` (single record), `zone` (authoritative zone, also its NXDOMAIN/NODATA), `access`, `any`, `ratelimit`, `upstream`, `""`.
+`reason`: `list`, `custom`, `service`, `country`, `safesearch`, `record` (single record), `zone` (authoritative zone, also its NXDOMAIN/NODATA), `access`, `any`, `ratelimit`, `upstream`, `""`.
+`country` (1.2.0): ISO-3166 alpha-2 code (upper case, or `EU`/`AP`) of the first public address in the answer that
+was returned, or of the blocked country for `blocked_country`; `""` for answers without public addresses, own zones and
+records, rewrites and without a country database. Status filter `country` = `blocked_country`; `blocked` includes it.
 `answer`: short text, comma separated: addresses bare, other types with their type (`"93.184.216.34, 2606:2800::1"`,
 `"CNAME forcesafesearch.google.com"`, `"MX 10 mx.home.lan"`, `"SRV 0 5 389 ldap.home.lan"`, `"PTR nas.home.lan"`,
 `"TXT \"v=spf1 mx -all\""` – TXT strings joined, quoted and cut after 60 characters with `…`; `""`), at most 200 bytes.
@@ -289,6 +297,49 @@ The local records of version 1.0 became records with the **same ids** (IP → A/
 `GET /api/rewrites` → `200 [rewrite…]` (ordered by domain); `POST` → `201` (creates an A/AAAA/CNAME record with
 TTL 60, type from `answer`); `PUT /api/rewrites/{id}` → `200` (name, value, enabled; type follows the answer);
 `DELETE` → `204`. Ids of records of other types → `404`. Validation errors keep the field names `domain`/`answer`.
+
+## Countries (1.2.0)
+
+PK95 DNS looks up the country of the A/AAAA addresses in upstream and cache answers (after the CNAME chain) in the
+**DB-IP Country Lite** database (CC BY 4.0, „IP-Geolocation by DB-IP (https://db-ip.com)“), downloaded monthly into
+`<data>/geoip/` like PK95 Proxy (a failed download is retried after 6 hours; `PK95DNS_GEOIP=off` disables it).
+Private, loopback, link-local, CGNAT and documentation addresses, own zones and records have no country. Without a
+database there are no countries and nothing is blocked – never an error.
+
+**Caveat:** the country is where the *answering server* is. With CDNs and anycast this is often a nearby node, not
+the home country of the company behind the name.
+
+### `GET /api/geo`, `PUT /api/geo`
+
+```json
+{ "mode": "block", "countries": ["CN", "RU"], "available": true, "db_date": "2026-11-01",
+  "attribution": "IP-Geolocation by DB-IP (https://db-ip.com)" }
+```
+
+`PUT` takes `{"mode", "countries"}` (each optional; missing keys stay) and answers the same shape.
+- `mode`: `off` (default), `block` (block the listed countries), `allow` (allow only the listed countries).
+- `countries`: at most 250 known codes; trimmed, upper-cased, duplicates removed. `allow` needs at least one.
+- Errors: `422 fields.mode`, `fields.countries` (not a list, too many, `allow` without countries), `fields.countries.N`.
+- `available`/`db_date`: a database is loaded / its build date (`""` without).
+
+Blocking applies when protection is on and the client's filtering is on, after the list and service checks, to the
+final upstream or cache answer: allow rules (`@@`, allow lists), own zones and records, rewrites and SafeSearch always
+win. A/AAAA records of blocked countries are removed; with no address left the query gets the normal blocked answer
+of the blocking mode with status `blocked_country`, otherwise the remaining addresses are answered (status `ok`) and the
+removed ones are counted. Addresses without a country (private, unknown) are never removed. `GET /api/check` does not
+ask upstreams, so it never reports `blocked_country`.
+
+### `GET /api/countries?hours=24`
+
+All countries of the period (`hours` like `/api/stats`), most answers first:
+
+```json
+{ "hours": 24, "countries": [ { "code": "DE", "count": 8123, "blocked": 0, "removed": 0, "clients": 3 } ],
+  "unknown": 123 }
+```
+
+`clients`: distinct clients with answers in the country. `unknown`: answers with public addresses of which none has a
+country in the database.
 
 ## Blocked services
 

@@ -16,6 +16,7 @@ import (
 	"pk95dns/internal/cache"
 	"pk95dns/internal/config"
 	"pk95dns/internal/filter"
+	"pk95dns/internal/geo"
 	"pk95dns/internal/querylog"
 	"pk95dns/internal/records"
 	"pk95dns/internal/stats"
@@ -37,6 +38,9 @@ type Deps struct {
 	Cache  *cache.Cache
 	Log    *querylog.Writer
 	Stats  *stats.Recorder
+	// Geo looks up the countries of answer addresses (statistics and country blocking).
+	// nil or without a database: no countries, nothing blocked.
+	Geo *geo.DB
 	// OnListen is called when binding fails (ok=false, German message) and when it works
 	// again after a failure (ok=true). Optional.
 	OnListen func(ok bool, msg string)
@@ -214,6 +218,7 @@ func (s *Server) log(st *state, req *dns.Msg, client netip.Addr, o *outcome, ans
 		Answer:     answer,
 		ElapsedMS:  elapsed,
 		Cached:     o.cached,
+		Country:    o.country,
 	}
 	ev := stats.Event{
 		TS:        now,
@@ -223,6 +228,9 @@ func (s *Server) log(st *state, req *dns.Msg, client netip.Addr, o *outcome, ans
 		Upstream:  o.upstream,
 		ElapsedMS: elapsed,
 		Cached:    o.cached,
+		Countries: o.countries,
+		Removed:   o.removed,
+		Unknown:   o.unknownCountry,
 	}
 	if s.deps.Log != nil {
 		s.deps.Log.Add(entry)

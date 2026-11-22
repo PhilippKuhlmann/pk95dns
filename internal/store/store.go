@@ -32,6 +32,7 @@ const (
 	keySettings        = "settings"
 	keyBlockedServices = "blocked_services"
 	keyProtection      = "protection"
+	keyGeo             = "geo"
 )
 
 type protectionJSON struct {
@@ -44,8 +45,8 @@ type protectionJSON struct {
 // fields (blocked services, protection), which are stored separately.
 func (s *Store) LoadSettings() (config.Settings, error) {
 	st := config.Defaults()
-	rows, err := s.DB.Query(`SELECT key, value FROM settings WHERE key IN (?, ?, ?)`,
-		keySettings, keyBlockedServices, keyProtection)
+	rows, err := s.DB.Query(`SELECT key, value FROM settings WHERE key IN (?, ?, ?, ?)`,
+		keySettings, keyBlockedServices, keyProtection, keyGeo)
 	if err != nil {
 		return config.Settings{}, err
 	}
@@ -81,6 +82,13 @@ func (s *Store) LoadSettings() (config.Settings, error) {
 		st.ProtectionEnabled = p.Enabled
 		st.ProtectionPausedUntil = p.PausedUntil
 	}
+	if v, ok := values[keyGeo]; ok {
+		g := st.Geo
+		if err := json.Unmarshal([]byte(v), &g); err != nil {
+			return config.Settings{}, fmt.Errorf("Gespeicherte Ländersperre ist ungültig: %w", err)
+		}
+		st.Geo = g
+	}
 	return st.Normalized(), nil
 }
 
@@ -99,12 +107,16 @@ func (s *Store) SaveSettings(st config.Settings) error {
 	if err != nil {
 		return err
 	}
+	geo, err := json.Marshal(st.Geo)
+	if err != nil {
+		return err
+	}
 	tx, err := s.DB.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	for _, kv := range [][2]string{{keySettings, string(pub)}, {keyBlockedServices, string(bs)}, {keyProtection, string(prot)}} {
+	for _, kv := range [][2]string{{keySettings, string(pub)}, {keyBlockedServices, string(bs)}, {keyProtection, string(prot)}, {keyGeo, string(geo)}} {
 		if _, err := tx.Exec(`INSERT INTO settings (key, value) VALUES (?, ?)
 			ON CONFLICT (key) DO UPDATE SET value = excluded.value`, kv[0], kv[1]); err != nil {
 			return err
@@ -446,6 +458,7 @@ type Query struct {
 	Answer     string  `json:"answer"`
 	ElapsedMS  float64 `json:"elapsed_ms"`
 	Cached     bool    `json:"cached"`
+	Country    string  `json:"country"` // first public answer address, or the blocked country; "" without
 }
 
 // QueryFilter for Queries. Statuses empty = all. Client matches client_ip or client_name
@@ -476,14 +489,14 @@ func (s *Store) InsertQueries(qs []Query) error {
 	}
 	defer tx.Rollback()
 	stmt, err := tx.Prepare(`INSERT INTO queries (ts, client_ip, client_name, name, qtype, status, reason, rule,
-		list_id, service, upstream, rcode, answer, elapsed_ms, cached) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		list_id, service, upstream, rcode, answer, elapsed_ms, cached, country) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 	for _, q := range qs {
 		if _, err := stmt.Exec(q.TS, q.ClientIP, q.ClientName, q.Name, q.QType, q.Status, q.Reason, q.Rule,
-			q.ListID, q.Service, q.Upstream, q.Rcode, q.Answer, q.ElapsedMS, boolInt(q.Cached)); err != nil {
+			q.ListID, q.Service, q.Upstream, q.Rcode, q.Answer, q.ElapsedMS, boolInt(q.Cached), q.Country); err != nil {
 			return err
 		}
 	}
@@ -527,7 +540,7 @@ func (s *Store) Queries(f QueryFilter) ([]Query, error) {
 		}
 	}
 	q := `SELECT id, ts, client_ip, client_name, name, qtype, status, reason, rule, list_id, service, upstream,
-		rcode, answer, elapsed_ms, cached FROM queries`
+		rcode, answer, elapsed_ms, cached, country FROM queries`
 	if len(where) > 0 {
 		q += ` WHERE ` + strings.Join(where, ` AND `)
 	}
@@ -542,7 +555,7 @@ func (s *Store) Queries(f QueryFilter) ([]Query, error) {
 	for rows.Next() {
 		var e Query
 		if err := rows.Scan(&e.ID, &e.TS, &e.ClientIP, &e.ClientName, &e.Name, &e.QType, &e.Status, &e.Reason,
-			&e.Rule, &e.ListID, &e.Service, &e.Upstream, &e.Rcode, &e.Answer, &e.ElapsedMS, &e.Cached); err != nil {
+			&e.Rule, &e.ListID, &e.Service, &e.Upstream, &e.Rcode, &e.Answer, &e.ElapsedMS, &e.Cached, &e.Country); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -584,8 +597,12 @@ type HourStats struct {
 	Cached     int64
 	SafeSearch int64
 	Services   int64
-	Local      int64   // answered from own zones, records or a hosts rule with an address (status rewrite)
-	ElapsedMS  float64 // sum over all queries of the hour
+	Local      int64 // answered from own zones, records or a hosts rule with an address (status rewrite)
+	// CountryBlocked: answers fully blocked by country; CountryUnknown: answers with public
+	// addresses of which none has a country in the database.
+	CountryBlocked int64
+	CountryUnknown int64
+	ElapsedMS      float64 // sum over all queries of the hour
 }
 
 // TopEntry is a counter of one key in one hour (stats_top). Kinds are chosen by the stats
@@ -606,8 +623,9 @@ func (s *Store) SaveHour(h HourStats, top []TopEntry) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT OR REPLACE INTO stats_hours (hour, queries, blocked, cached, safesearch, services, local, elapsed_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, h.Hour, h.Queries, h.Blocked, h.Cached, h.SafeSearch, h.Services, h.Local, h.ElapsedMS); err != nil {
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO stats_hours (hour, queries, blocked, cached, safesearch, services, local,
+		country_blocked, country_unknown, elapsed_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, h.Hour, h.Queries, h.Blocked,
+		h.Cached, h.SafeSearch, h.Services, h.Local, h.CountryBlocked, h.CountryUnknown, h.ElapsedMS); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM stats_top WHERE hour = ?`, h.Hour); err != nil {
@@ -631,8 +649,8 @@ func (s *Store) SaveHour(h HourStats, top []TopEntry) error {
 
 // LoadHours returns the stored hours with from <= Hour < to, ascending.
 func (s *Store) LoadHours(from, to int64) ([]HourStats, error) {
-	rows, err := s.DB.Query(`SELECT hour, queries, blocked, cached, safesearch, services, local, elapsed_ms
-		FROM stats_hours WHERE hour >= ? AND hour < ? ORDER BY hour`, from, to)
+	rows, err := s.DB.Query(`SELECT hour, queries, blocked, cached, safesearch, services, local, country_blocked,
+		country_unknown, elapsed_ms FROM stats_hours WHERE hour >= ? AND hour < ? ORDER BY hour`, from, to)
 	if err != nil {
 		return nil, err
 	}
@@ -640,7 +658,7 @@ func (s *Store) LoadHours(from, to int64) ([]HourStats, error) {
 	out := []HourStats{}
 	for rows.Next() {
 		var h HourStats
-		if err := rows.Scan(&h.Hour, &h.Queries, &h.Blocked, &h.Cached, &h.SafeSearch, &h.Services, &h.Local, &h.ElapsedMS); err != nil {
+		if err := rows.Scan(&h.Hour, &h.Queries, &h.Blocked, &h.Cached, &h.SafeSearch, &h.Services, &h.Local, &h.CountryBlocked, &h.CountryUnknown, &h.ElapsedMS); err != nil {
 			return nil, err
 		}
 		out = append(out, h)
