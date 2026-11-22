@@ -9,6 +9,7 @@ import (
 	"pk95dns/internal/dnsserver"
 	"pk95dns/internal/filter"
 	"pk95dns/internal/records"
+	"pk95dns/internal/stats"
 	"pk95dns/internal/store"
 	"pk95dns/internal/upstream"
 )
@@ -195,14 +196,16 @@ func (a *API) handleStats(w http.ResponseWriter, r *http.Request) {
 		internalError(w, r, err)
 		return
 	}
-	if len(sum.TopClients) > 0 {
+	if len(sum.TopClients)+len(sum.TopClientsAllowed)+len(sum.TopClientsBlocked) > 0 {
 		m, err := a.clientMatcher()
 		if err != nil {
 			internalError(w, r, err)
 			return
 		}
-		for i := range sum.TopClients {
-			sum.TopClients[i].Name = a.displayName(m, sum.TopClients[i].IP)
+		for _, list := range [][]stats.ClientCount{sum.TopClients, sum.TopClientsAllowed, sum.TopClientsBlocked} {
+			for i := range list {
+				list[i].Name = a.displayName(m, list[i].IP)
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, sum)

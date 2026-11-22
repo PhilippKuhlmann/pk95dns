@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -43,6 +44,13 @@ type Summary struct {
 	TopClients   []ClientCount   `json:"top_clients"`
 	TopUpstreams []UpstreamCount `json:"top_upstreams"`
 	TopCountries []CountryCount  `json:"top_countries"`
+	// Split lists (1.4.0, at most 20 each): allowed = every status except blocked,
+	// blocked_service and blocked_country (as totals: queries - blocked).
+	TopAllowed          []NameCount    `json:"top_allowed"`
+	TopClientsAllowed   []ClientCount  `json:"top_clients_allowed"`   // by count - blocked
+	TopClientsBlocked   []ClientCount  `json:"top_clients_blocked"`   // by blocked, blocked > 0
+	TopCountriesAllowed []CountryCount `json:"top_countries_allowed"` // by count, count > 0
+	TopCountriesBlocked []CountryCount `json:"top_countries_blocked"` // by list_blocked + blocked, > 0
 }
 
 // CountryCount: Count answers with at least one public address in the country, Blocked of
@@ -131,6 +139,7 @@ const (
 	kindClient        = "client"         // client IP
 	kindClientBlocked = "client_blocked" // client IP of blocked queries
 	kindUpstream      = "upstream"       // upstream address, Sum = elapsed ms
+	kindAllowed       = "allowed"        // names of queries that were not blocked (1.4.0)
 )
 
 // Country kinds: answers per country, of those fully blocked, addresses removed, and
@@ -144,7 +153,7 @@ const (
 	kindCountryListBlocked = "country_list_blocked"
 )
 
-var allKinds = []string{kindDomain, kindBlocked, kindClient, kindClientBlocked, kindUpstream,
+var allKinds = []string{kindDomain, kindBlocked, kindAllowed, kindClient, kindClientBlocked, kindUpstream,
 	kindCountry, kindCountryBlocked, kindCountryRemoved, kindCountryClient, kindCountryListBlocked}
 
 var countryKinds = []string{kindCountry, kindCountryBlocked, kindCountryRemoved, kindCountryClient, kindCountryListBlocked}
@@ -336,6 +345,9 @@ func (r *Recorder) Record(e Event) {
 		t.Cached++
 	}
 	b.add(kindDomain, e.Name, 0, ms)
+	if !blocked {
+		b.add(kindAllowed, e.Name, 0, ms)
+	}
 	b.add(kindClient, e.Client, 0, ms)
 	if blocked {
 		b.add(kindBlocked, e.Name, 0, ms)
@@ -694,7 +706,72 @@ func (r *Recorder) Summary(hours int, now time.Time) (Summary, error) {
 	for _, d := range countryDetails(c.tops, summaryTopN) {
 		s.TopCountries = append(s.TopCountries, d.CountryCount)
 	}
+	s.splitTops(c.tops)
 	return s, nil
+}
+
+// splitTops fills the allowed | blocked lists from all collected keys (not from the lists
+// that are already cut at 20).
+func (s *Summary) splitTops(tops map[string]map[string]*counter) {
+	s.TopAllowed = nameCounts(tops[kindAllowed])
+
+	all := clientCounts(tops[kindClient], tops[kindClientBlocked], 0)
+	allowed := slices.Clone(all)
+	sort.SliceStable(allowed, func(i, j int) bool {
+		a, b := allowed[i].Count-allowed[i].Blocked, allowed[j].Count-allowed[j].Blocked
+		if a != b {
+			return a > b
+		}
+		return allowed[i].IP < allowed[j].IP
+	})
+	s.TopClientsAllowed = []ClientCount{}
+	for _, c := range allowed {
+		if c.Count-c.Blocked > 0 && len(s.TopClientsAllowed) < summaryTopN {
+			s.TopClientsAllowed = append(s.TopClientsAllowed, c)
+		}
+	}
+	blocked := slices.Clone(all)
+	sort.SliceStable(blocked, func(i, j int) bool {
+		if blocked[i].Blocked != blocked[j].Blocked {
+			return blocked[i].Blocked > blocked[j].Blocked
+		}
+		return blocked[i].IP < blocked[j].IP
+	})
+	s.TopClientsBlocked = []ClientCount{}
+	for _, c := range blocked {
+		if c.Blocked > 0 && len(s.TopClientsBlocked) < summaryTopN {
+			s.TopClientsBlocked = append(s.TopClientsBlocked, c)
+		}
+	}
+
+	countries := countryDetails(tops, 0)
+	byCount := slices.Clone(countries)
+	sort.SliceStable(byCount, func(i, j int) bool {
+		if byCount[i].Count != byCount[j].Count {
+			return byCount[i].Count > byCount[j].Count
+		}
+		return byCount[i].Code < byCount[j].Code
+	})
+	s.TopCountriesAllowed = []CountryCount{}
+	for _, d := range byCount {
+		if d.Count > 0 && len(s.TopCountriesAllowed) < summaryTopN {
+			s.TopCountriesAllowed = append(s.TopCountriesAllowed, d.CountryCount)
+		}
+	}
+	byBlocked := slices.Clone(countries)
+	sort.SliceStable(byBlocked, func(i, j int) bool {
+		a, b := byBlocked[i].ListBlocked+byBlocked[i].Blocked, byBlocked[j].ListBlocked+byBlocked[j].Blocked
+		if a != b {
+			return a > b
+		}
+		return byBlocked[i].Code < byBlocked[j].Code
+	})
+	s.TopCountriesBlocked = []CountryCount{}
+	for _, d := range byBlocked {
+		if d.ListBlocked+d.Blocked > 0 && len(s.TopCountriesBlocked) < summaryTopN {
+			s.TopCountriesBlocked = append(s.TopCountriesBlocked, d.CountryCount)
+		}
+	}
 }
 
 // countryDetails builds the per-country numbers from the collected tops, most answers

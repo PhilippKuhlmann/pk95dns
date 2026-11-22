@@ -936,3 +936,82 @@ func TestListBlockedCountries(t *testing.T) {
 		t.Fatalf("stored hour of the original query: %+v %v", hours, err)
 	}
 }
+
+// Split lists: allowed | blocked for domains, clients and countries, computed from all keys
+// (not the lists cut at 20), blocked_country counts as blocked, empty lists are [].
+func TestSplitTops(t *testing.T) {
+	r, st, _ := newTest(t)
+	empty := summary(t, r, 24, base)
+	raw, _ := json.Marshal(empty)
+	for _, k := range []string{"top_allowed", "top_clients_allowed", "top_clients_blocked", "top_countries_allowed", "top_countries_blocked"} {
+		if !strings.Contains(string(raw), `"`+k+`":[]`) {
+			t.Fatalf("%s not [] in %s", k, raw)
+		}
+	}
+	// An old hour (before 1.4.0): domains and blocked names, but no "allowed" kind.
+	if err := st.SaveHour(store.HourStats{Hour: baseHour() - 3*hourSec, Queries: 5}, []store.TopEntry{
+		{Kind: kindDomain, Key: "old.example", Count: 5}, {Kind: kindClient, Key: "192.168.1.99", Count: 5}}); err != nil {
+		t.Fatal(err)
+	}
+	ev := func(client, name, status string, countries ...string) {
+		r.Record(Event{TS: base, Client: client, Name: name, Status: status, Countries: countries})
+	}
+	// 25 allowed names with 1..25 queries: only the 20 biggest are listed
+	for i := 1; i <= 25; i++ {
+		for range i {
+			ev("192.168.1.10", fmt.Sprintf("a%02d.example", i), "ok", "DE")
+		}
+	}
+	// client .20: many queries, mostly blocked; client .30: fewer, all allowed
+	for range 40 {
+		ev("192.168.1.20", "ads.example", "blocked")
+	}
+	for range 5 {
+		ev("192.168.1.20", "page.example", "ok", "US")
+	}
+	for range 30 {
+		ev("192.168.1.30", "news.example", "allowed", "FR")
+	}
+	for range 3 {
+		ev("192.168.1.30", "ru.example", "blocked_country", "RU")
+	}
+	r.RecordListBlocked(base, "CN")
+
+	s := summary(t, r, 24, base)
+	if len(s.TopAllowed) != 20 || s.TopAllowed[0].Name != "news.example" || s.TopAllowed[0].Count != 30 || s.TopAllowed[1].Name != "a25.example" {
+		t.Fatalf("top_allowed %+v", s.TopAllowed)
+	}
+	for _, n := range s.TopAllowed {
+		if n.Name == "ads.example" || n.Name == "ru.example" || n.Name == "old.example" {
+			t.Fatalf("blocked or old name in top_allowed: %+v", n)
+		}
+	}
+	if s.TopBlocked[0].Name != "ads.example" || len(s.TopBlocked) != 2 {
+		t.Fatalf("top_blocked unchanged: %+v", s.TopBlocked)
+	}
+	// .10: 325 allowed; .30: 30 allowed (33 total); .20: 5 allowed (45 total); old .99: 5
+	ips := func(l []ClientCount) (out []string) {
+		for _, c := range l {
+			out = append(out, fmt.Sprintf("%s:%d/%d", c.IP, c.Count, c.Blocked))
+		}
+		return out
+	}
+	if got := ips(s.TopClientsAllowed); !slices.Equal(got, []string{"192.168.1.10:325/0", "192.168.1.30:33/3", "192.168.1.20:45/40", "192.168.1.99:5/0"}) {
+		t.Fatalf("top_clients_allowed %v", got)
+	}
+	if got := ips(s.TopClientsBlocked); !slices.Equal(got, []string{"192.168.1.20:45/40", "192.168.1.30:33/3"}) {
+		t.Fatalf("top_clients_blocked %v", got)
+	}
+	codes := func(l []CountryCount) (out []string) {
+		for _, c := range l {
+			out = append(out, c.Code)
+		}
+		return out
+	}
+	if got := codes(s.TopCountriesAllowed); !slices.Equal(got, []string{"DE", "FR", "US", "RU"}) {
+		t.Fatalf("top_countries_allowed %v", got) // RU has count 3 (answers), all blocked by country
+	}
+	if got := codes(s.TopCountriesBlocked); !slices.Equal(got, []string{"RU", "CN"}) {
+		t.Fatalf("top_countries_blocked %v", got)
+	}
+}
